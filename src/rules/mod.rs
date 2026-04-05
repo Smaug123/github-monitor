@@ -538,6 +538,10 @@ fn ruleset_rule_presence_result(
 
 fn workflow_runs_on_push_to_branch(workflow: &Workflow, branch: &str) -> bool {
     workflow.triggers.push.as_ref().is_some_and(|push| {
+        if !has_branch_push_filters(push) && has_tag_push_filters(push) {
+            return false;
+        }
+
         branch_matches_filters(&push.branches, branch)
             && !push
                 .branches_ignore
@@ -574,6 +578,14 @@ fn branch_pattern_matches(pattern: &str, branch: &str) -> bool {
     branch_pattern_regex(pattern).is_some_and(|regex| regex.is_match(branch))
 }
 
+fn has_branch_push_filters(push: &crate::workflow::model::TriggerFilter) -> bool {
+    !push.branches.is_empty() || !push.branches_ignore.is_empty()
+}
+
+fn has_tag_push_filters(push: &crate::workflow::model::TriggerFilter) -> bool {
+    !push.tags.is_empty() || !push.tags_ignore.is_empty()
+}
+
 fn branch_pattern_regex(pattern: &str) -> Option<Regex> {
     let body = github_pattern_to_regex(pattern)?;
     Regex::new(&format!("^{body}$")).ok()
@@ -583,14 +595,11 @@ fn github_pattern_to_regex(pattern: &str) -> Option<String> {
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut regex = String::new();
     let mut index = 0usize;
-    let mut previous_token_is_quantifiable = false;
-
     while index < chars.len() {
         match chars[index] {
             '\\' => {
                 let escaped = chars.get(index + 1).copied().unwrap_or('\\');
                 push_escaped_char(&mut regex, escaped);
-                previous_token_is_quantifiable = true;
                 index += if index + 1 < chars.len() { 2 } else { 1 };
             }
             '*' => {
@@ -601,26 +610,26 @@ fn github_pattern_to_regex(pattern: &str) -> Option<String> {
                     regex.push_str("[^/]*");
                     index += 1;
                 }
-                previous_token_is_quantifiable = true;
             }
-            '?' | '+' => {
-                if previous_token_is_quantifiable {
-                    regex.push(chars[index]);
+            '?' => {
+                regex.push_str("[^/]");
+                index += 1;
+            }
+            '+' => {
+                if chars.get(index + 1) == Some(&'(') {
+                    return None;
                 } else {
                     push_escaped_char(&mut regex, chars[index]);
                 }
-                previous_token_is_quantifiable = false;
                 index += 1;
             }
             '[' => {
                 let (class_regex, next_index) = parse_character_class(&chars, index)?;
                 regex.push_str(&class_regex);
-                previous_token_is_quantifiable = true;
                 index = next_index;
             }
             ch => {
                 push_escaped_char(&mut regex, ch);
-                previous_token_is_quantifiable = true;
                 index += 1;
             }
         }
@@ -761,7 +770,7 @@ fn workflows_run_nix_flake_check(facts: &RepoFacts) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use proptest::prelude::*;
 
@@ -971,11 +980,17 @@ mod tests {
             proptest::collection::vec(path_fragment(), 0..3),
             proptest::collection::vec(path_fragment(), 0..3),
             proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(path_fragment(), 0..3),
         )
-            .prop_map(|(branches, branches_ignore, paths)| TriggerFilter {
-                branches,
-                branches_ignore,
-                paths,
+            .prop_map(|(branches, branches_ignore, tags, tags_ignore, paths)| {
+                TriggerFilter {
+                    branches,
+                    branches_ignore,
+                    tags,
+                    tags_ignore,
+                    paths,
+                }
             })
     }
 
@@ -1142,6 +1157,51 @@ mod tests {
             })
     }
 
+    fn glob_literal_char_strategy() -> impl Strategy<Value = char> {
+        let ascii_letters = ('a'..='z').collect::<Vec<_>>();
+        let digits = ('0'..='9').collect::<Vec<_>>();
+
+        prop_oneof![
+            proptest::sample::select(ascii_letters),
+            proptest::sample::select(digits),
+            Just('/'),
+            Just('-'),
+            Just('_'),
+            Just('.'),
+        ]
+    }
+
+    fn glob_pattern_subset_strategy() -> impl Strategy<Value = String> {
+        let literal = proptest::collection::vec(glob_literal_char_strategy(), 1..=3)
+            .prop_map(|chars| chars.into_iter().collect::<String>());
+        let escaped = prop_oneof![
+            Just("\\*".to_owned()),
+            Just("\\?".to_owned()),
+            Just("\\+".to_owned()),
+            Just("\\[".to_owned()),
+            Just("\\]".to_owned()),
+            Just("\\!".to_owned()),
+            Just("\\\\".to_owned()),
+        ];
+
+        proptest::collection::vec(
+            prop_oneof![
+                literal,
+                Just("*".to_owned()),
+                Just("**".to_owned()),
+                Just("?".to_owned()),
+                escaped,
+            ],
+            0..8,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    fn branch_name_strategy() -> impl Strategy<Value = String> {
+        proptest::collection::vec(glob_literal_char_strategy(), 0..12)
+            .prop_map(|chars| chars.into_iter().collect::<String>())
+    }
+
     fn empty_repo_settings() -> RepoSettings {
         RepoSettings {
             private: false,
@@ -1187,6 +1247,8 @@ mod tests {
                     push: Some(TriggerFilter {
                         branches: vec!["main".to_owned()],
                         branches_ignore: Vec::new(),
+                        tags: Vec::new(),
+                        tags_ignore: Vec::new(),
                         paths: Vec::new(),
                     }),
                     pull_request: None,
@@ -1252,6 +1314,95 @@ mod tests {
             RuleResult::Skip { .. } => "skip",
             RuleResult::Error { .. } => "error",
         }
+    }
+
+    fn reference_branch_pattern_matches(pattern: &str, branch: &str) -> bool {
+        fn go(
+            pattern: &[char],
+            pattern_index: usize,
+            branch: &[char],
+            branch_index: usize,
+            memo: &mut HashMap<(usize, usize), bool>,
+        ) -> bool {
+            if let Some(result) = memo.get(&(pattern_index, branch_index)) {
+                return *result;
+            }
+
+            let result = if pattern_index == pattern.len() {
+                branch_index == branch.len()
+            } else {
+                match pattern[pattern_index] {
+                    '\\' => {
+                        let escaped = pattern.get(pattern_index + 1).copied().unwrap_or('\\');
+                        let next_pattern_index = if pattern_index + 1 < pattern.len() {
+                            pattern_index + 2
+                        } else {
+                            pattern_index + 1
+                        };
+
+                        branch.get(branch_index) == Some(&escaped)
+                            && go(pattern, next_pattern_index, branch, branch_index + 1, memo)
+                    }
+                    '*' if pattern.get(pattern_index + 1) == Some(&'*') => {
+                        (branch_index..=branch.len()).any(|next_branch_index| {
+                            go(pattern, pattern_index + 2, branch, next_branch_index, memo)
+                        })
+                    }
+                    '*' => {
+                        let zero_width_match =
+                            go(pattern, pattern_index + 1, branch, branch_index, memo);
+                        zero_width_match
+                            || (branch_index..branch.len())
+                                .take_while(|index| branch[*index] != '/')
+                                .map(|index| index + 1)
+                                .any(|next_branch_index| {
+                                    go(pattern, pattern_index + 1, branch, next_branch_index, memo)
+                                })
+                    }
+                    '?' => {
+                        branch.get(branch_index).is_some_and(|ch| *ch != '/')
+                            && go(pattern, pattern_index + 1, branch, branch_index + 1, memo)
+                    }
+                    ch => {
+                        branch.get(branch_index) == Some(&ch)
+                            && go(pattern, pattern_index + 1, branch, branch_index + 1, memo)
+                    }
+                }
+            };
+
+            memo.insert((pattern_index, branch_index), result);
+            result
+        }
+
+        let pattern = pattern.chars().collect::<Vec<_>>();
+        let branch = branch.chars().collect::<Vec<_>>();
+        let mut memo = HashMap::new();
+
+        go(&pattern, 0, &branch, 0, &mut memo)
+    }
+
+    fn reference_branch_matches_filters(filters: &[String], branch: &str) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+
+        let mut matched = false;
+        let mut saw_positive_pattern = false;
+
+        for filter in filters {
+            let (negated, pattern) = if let Some(pattern) = filter.strip_prefix('!') {
+                (true, pattern)
+            } else {
+                saw_positive_pattern = true;
+                (false, filter.as_str())
+            };
+
+            if reference_branch_pattern_matches(pattern, branch) {
+                matched = !negated;
+            }
+        }
+
+        saw_positive_pattern && matched
     }
 
     proptest! {
@@ -1373,6 +1524,43 @@ mod tests {
             );
             prop_assert!(is_valid_variant);
         }
+
+        #[test]
+        fn branch_pattern_matches_agrees_with_reference_for_core_glob_subset(
+            pattern in glob_pattern_subset_strategy(),
+            branch in branch_name_strategy(),
+        ) {
+            prop_assert_eq!(
+                branch_pattern_matches(&pattern, &branch),
+                reference_branch_pattern_matches(&pattern, &branch)
+            );
+        }
+
+        #[test]
+        fn branch_matches_filters_agrees_with_reference_for_core_glob_subset(
+            raw_filters in proptest::collection::vec(
+                (any::<bool>(), glob_pattern_subset_strategy()),
+                0..6,
+            ),
+            branch in branch_name_strategy(),
+        ) {
+            let filters = raw_filters
+                .into_iter()
+                .enumerate()
+                .map(|(index, (negated, pattern))| {
+                    if negated && index > 0 {
+                        format!("!{pattern}")
+                    } else {
+                        pattern
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            prop_assert_eq!(
+                branch_matches_filters(&filters, &branch),
+                reference_branch_matches_filters(&filters, &branch)
+            );
+        }
     }
 
     #[test]
@@ -1487,6 +1675,8 @@ mod tests {
                     push: Some(TriggerFilter {
                         branches: vec!["release/*".to_owned()],
                         branches_ignore: Vec::new(),
+                        tags: Vec::new(),
+                        tags_ignore: Vec::new(),
                         paths: Vec::new(),
                     }),
                     pull_request: None,
@@ -1515,6 +1705,8 @@ mod tests {
                     push: Some(TriggerFilter {
                         branches: vec!["release/**".to_owned(), "!release/**-alpha".to_owned()],
                         branches_ignore: Vec::new(),
+                        tags: Vec::new(),
+                        tags_ignore: Vec::new(),
                         paths: Vec::new(),
                     }),
                     pull_request: None,
@@ -1542,6 +1734,67 @@ mod tests {
                     push: Some(TriggerFilter {
                         branches: Vec::new(),
                         branches_ignore: vec!["main".to_owned()],
+                        tags: Vec::new(),
+                        tags_ignore: Vec::new(),
+                        paths: Vec::new(),
+                    }),
+                    pull_request: None,
+                    pull_request_target: None,
+                    workflow_dispatch: None,
+                },
+                jobs: BTreeMap::new(),
+            },
+        }];
+
+        assert!(matches!(
+            evaluate(&RuleKind::WorkflowExistsForDefaultBranch, &facts),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_exists_for_default_branch_treats_question_mark_as_single_char_wildcard() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("release/x");
+        facts.workflows = vec![WorkflowFile {
+            path: ".github/workflows/release.yml".to_owned(),
+            workflow: Workflow {
+                name: Some("Release".to_owned()),
+                triggers: Triggers {
+                    push: Some(TriggerFilter {
+                        branches: vec!["release/?".to_owned()],
+                        branches_ignore: Vec::new(),
+                        tags: Vec::new(),
+                        tags_ignore: Vec::new(),
+                        paths: Vec::new(),
+                    }),
+                    pull_request: None,
+                    pull_request_target: None,
+                    workflow_dispatch: None,
+                },
+                jobs: BTreeMap::new(),
+            },
+        }];
+
+        assert_eq!(
+            evaluate(&RuleKind::WorkflowExistsForDefaultBranch, &facts),
+            RuleResult::Pass
+        );
+    }
+
+    #[test]
+    fn workflow_exists_for_default_branch_ignores_tags_only_push_workflows() {
+        let mut facts = base_facts();
+        facts.workflows = vec![WorkflowFile {
+            path: ".github/workflows/release.yml".to_owned(),
+            workflow: Workflow {
+                name: Some("Release".to_owned()),
+                triggers: Triggers {
+                    push: Some(TriggerFilter {
+                        branches: Vec::new(),
+                        branches_ignore: Vec::new(),
+                        tags: vec!["v*".to_owned()],
+                        tags_ignore: Vec::new(),
                         paths: Vec::new(),
                     }),
                     pull_request: None,

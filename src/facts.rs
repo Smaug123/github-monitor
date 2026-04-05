@@ -559,11 +559,17 @@ mod tests {
             proptest::collection::vec(identifier(), 0..3),
             proptest::collection::vec(identifier(), 0..3),
             proptest::collection::vec(identifier(), 0..3),
+            proptest::collection::vec(identifier(), 0..3),
+            proptest::collection::vec(identifier(), 0..3),
         )
-            .prop_map(|(branches, branches_ignore, paths)| TriggerFilter {
-                branches,
-                branches_ignore,
-                paths,
+            .prop_map(|(branches, branches_ignore, tags, tags_ignore, paths)| {
+                TriggerFilter {
+                    branches,
+                    branches_ignore,
+                    tags,
+                    tags_ignore,
+                    paths,
+                }
             })
     }
 
@@ -756,11 +762,15 @@ mod tests {
                         push: Some(TriggerFilter {
                             branches: vec!["main".to_owned()],
                             branches_ignore: Vec::new(),
+                            tags: Vec::new(),
+                            tags_ignore: Vec::new(),
                             paths: Vec::new(),
                         }),
                         pull_request: Some(TriggerFilter {
                             branches: vec!["main".to_owned()],
                             branches_ignore: Vec::new(),
+                            tags: Vec::new(),
+                            tags_ignore: Vec::new(),
                             paths: Vec::new(),
                         }),
                         pull_request_target: None,
