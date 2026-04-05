@@ -558,8 +558,13 @@ mod tests {
         (
             proptest::collection::vec(identifier(), 0..3),
             proptest::collection::vec(identifier(), 0..3),
+            proptest::collection::vec(identifier(), 0..3),
         )
-            .prop_map(|(branches, paths)| TriggerFilter { branches, paths })
+            .prop_map(|(branches, branches_ignore, paths)| TriggerFilter {
+                branches,
+                branches_ignore,
+                paths,
+            })
     }
 
     fn with_value_strategy() -> impl Strategy<Value = WithValue> {
@@ -750,10 +755,12 @@ mod tests {
                     triggers: Triggers {
                         push: Some(TriggerFilter {
                             branches: vec!["main".to_owned()],
+                            branches_ignore: Vec::new(),
                             paths: Vec::new(),
                         }),
                         pull_request: Some(TriggerFilter {
                             branches: vec!["main".to_owned()],
+                            branches_ignore: Vec::new(),
                             paths: Vec::new(),
                         }),
                         pull_request_target: None,

@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
@@ -340,14 +341,8 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
             ruleset_rule_presence_result(facts, RulesetRuleType::NonFastForward, "non_fast_forward")
         }
         RuleKind::UsesRulesetsNotLegacyProtection => {
-            if facts.rulesets.is_empty() {
-                RuleResult::Fail {
-                    reason:
-                        "no rulesets were found, so this repo cannot be verified as using rulesets"
-                            .to_owned(),
-                }
-            } else {
-                RuleResult::Pass
+            RuleResult::Skip {
+                reason: "RepoFacts does not record legacy branch protection state, so this rule cannot yet distinguish rulesets from legacy protection".to_owned(),
             }
         }
         RuleKind::WorkflowExistsForDefaultBranch => {
@@ -542,52 +537,144 @@ fn ruleset_rule_presence_result(
 }
 
 fn workflow_runs_on_push_to_branch(workflow: &Workflow, branch: &str) -> bool {
-    workflow
-        .triggers
-        .push
-        .as_ref()
-        .is_some_and(|push| branch_matches_filters(&push.branches, branch))
+    workflow.triggers.push.as_ref().is_some_and(|push| {
+        branch_matches_filters(&push.branches, branch)
+            && !push
+                .branches_ignore
+                .iter()
+                .any(|pattern| branch_pattern_matches(pattern, branch))
+    })
 }
 
 fn branch_matches_filters(filters: &[String], branch: &str) -> bool {
-    filters.is_empty()
-        || filters
-            .iter()
-            .any(|pattern| wildcard_matches(pattern, branch))
-}
+    if filters.is_empty() {
+        return true;
+    }
 
-fn wildcard_matches(pattern: &str, input: &str) -> bool {
-    let pattern = pattern.as_bytes();
-    let input = input.as_bytes();
-    let mut pattern_index = 0usize;
-    let mut input_index = 0usize;
-    let mut last_star = None;
-    let mut resume_input_index = 0usize;
+    let mut matched = false;
+    let mut saw_positive_pattern = false;
 
-    while input_index < input.len() {
-        if pattern_index < pattern.len()
-            && (pattern[pattern_index] == input[input_index] || pattern[pattern_index] == b'?')
-        {
-            pattern_index += 1;
-            input_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            last_star = Some(pattern_index);
-            pattern_index += 1;
-            resume_input_index = input_index;
-        } else if let Some(star_index) = last_star {
-            pattern_index = star_index + 1;
-            resume_input_index += 1;
-            input_index = resume_input_index;
+    for filter in filters {
+        let (negated, pattern) = if let Some(pattern) = filter.strip_prefix('!') {
+            (true, pattern)
         } else {
-            return false;
+            saw_positive_pattern = true;
+            (false, filter.as_str())
+        };
+
+        if branch_pattern_matches(pattern, branch) {
+            matched = !negated;
         }
     }
 
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
+    saw_positive_pattern && matched
+}
+
+fn branch_pattern_matches(pattern: &str, branch: &str) -> bool {
+    branch_pattern_regex(pattern).is_some_and(|regex| regex.is_match(branch))
+}
+
+fn branch_pattern_regex(pattern: &str) -> Option<Regex> {
+    let body = github_pattern_to_regex(pattern)?;
+    Regex::new(&format!("^{body}$")).ok()
+}
+
+fn github_pattern_to_regex(pattern: &str) -> Option<String> {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut regex = String::new();
+    let mut index = 0usize;
+    let mut previous_token_is_quantifiable = false;
+
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                let escaped = chars.get(index + 1).copied().unwrap_or('\\');
+                push_escaped_char(&mut regex, escaped);
+                previous_token_is_quantifiable = true;
+                index += if index + 1 < chars.len() { 2 } else { 1 };
+            }
+            '*' => {
+                if chars.get(index + 1) == Some(&'*') {
+                    regex.push_str(".*");
+                    index += 2;
+                } else {
+                    regex.push_str("[^/]*");
+                    index += 1;
+                }
+                previous_token_is_quantifiable = true;
+            }
+            '?' | '+' => {
+                if previous_token_is_quantifiable {
+                    regex.push(chars[index]);
+                } else {
+                    push_escaped_char(&mut regex, chars[index]);
+                }
+                previous_token_is_quantifiable = false;
+                index += 1;
+            }
+            '[' => {
+                let (class_regex, next_index) = parse_character_class(&chars, index)?;
+                regex.push_str(&class_regex);
+                previous_token_is_quantifiable = true;
+                index = next_index;
+            }
+            ch => {
+                push_escaped_char(&mut regex, ch);
+                previous_token_is_quantifiable = true;
+                index += 1;
+            }
+        }
     }
 
-    pattern_index == pattern.len()
+    Some(regex)
+}
+
+fn parse_character_class(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut end = start + 1;
+    while end < chars.len() {
+        if chars[end] == ']' && end > start + 1 {
+            break;
+        }
+        end += 1;
+    }
+
+    if end >= chars.len() || chars[end] != ']' {
+        return None;
+    }
+
+    let mut regex = String::from("[");
+    let mut index = start + 1;
+
+    if chars.get(index) == Some(&'!') {
+        regex.push('^');
+        index += 1;
+    }
+
+    while index < end {
+        match chars[index] {
+            '\\' => {
+                regex.push('\\');
+                regex.push(chars.get(index + 1).copied().unwrap_or('\\'));
+                index += if index + 1 < end { 2 } else { 1 };
+            }
+            ']' | '[' | '^' => {
+                regex.push('\\');
+                regex.push(chars[index]);
+                index += 1;
+            }
+            ch => {
+                regex.push(ch);
+                index += 1;
+            }
+        }
+    }
+
+    regex.push(']');
+    Some((regex, end + 1))
+}
+
+fn push_escaped_char(regex: &mut String, ch: char) {
+    regex.push_str(&regex::escape(&ch.to_string()));
 }
 
 fn workflow_uses_action(workflow: &Workflow, action: &str) -> bool {
@@ -883,8 +970,13 @@ mod tests {
         (
             proptest::collection::vec(path_fragment(), 0..3),
             proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(path_fragment(), 0..3),
         )
-            .prop_map(|(branches, paths)| TriggerFilter { branches, paths })
+            .prop_map(|(branches, branches_ignore, paths)| TriggerFilter {
+                branches,
+                branches_ignore,
+                paths,
+            })
     }
 
     fn action_reference_strategy() -> impl Strategy<Value = ActionReference> {
@@ -1094,6 +1186,7 @@ mod tests {
                 triggers: Triggers {
                     push: Some(TriggerFilter {
                         branches: vec!["main".to_owned()],
+                        branches_ignore: Vec::new(),
                         paths: Vec::new(),
                     }),
                     pull_request: None,
@@ -1227,7 +1320,7 @@ mod tests {
         #[test]
         fn workflow_actions_pinned_to_sha_passes_for_full_commit_shas(
             mut facts in repo_facts_strategy(),
-            versions in proptest::collection::vec(sha(), 0..4),
+            versions in proptest::collection::vec(sha(), 1..4),
         ) {
             facts.workflows = versions
                 .into_iter()
@@ -1373,6 +1466,99 @@ mod tests {
     }
 
     #[test]
+    fn uses_rulesets_not_legacy_protection_skips_until_facts_include_legacy_state() {
+        let facts = base_facts();
+
+        assert!(matches!(
+            evaluate(&RuleKind::UsesRulesetsNotLegacyProtection, &facts),
+            RuleResult::Skip { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_exists_for_default_branch_respects_single_star_slash_boundaries() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("release/train/main");
+        facts.workflows = vec![WorkflowFile {
+            path: ".github/workflows/release.yml".to_owned(),
+            workflow: Workflow {
+                name: Some("Release".to_owned()),
+                triggers: Triggers {
+                    push: Some(TriggerFilter {
+                        branches: vec!["release/*".to_owned()],
+                        branches_ignore: Vec::new(),
+                        paths: Vec::new(),
+                    }),
+                    pull_request: None,
+                    pull_request_target: None,
+                    workflow_dispatch: None,
+                },
+                jobs: BTreeMap::new(),
+            },
+        }];
+
+        assert!(matches!(
+            evaluate(&RuleKind::WorkflowExistsForDefaultBranch, &facts),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_exists_for_default_branch_supports_double_star_and_negation_order() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("release/beta/3-alpha");
+        facts.workflows = vec![WorkflowFile {
+            path: ".github/workflows/release.yml".to_owned(),
+            workflow: Workflow {
+                name: Some("Release".to_owned()),
+                triggers: Triggers {
+                    push: Some(TriggerFilter {
+                        branches: vec!["release/**".to_owned(), "!release/**-alpha".to_owned()],
+                        branches_ignore: Vec::new(),
+                        paths: Vec::new(),
+                    }),
+                    pull_request: None,
+                    pull_request_target: None,
+                    workflow_dispatch: None,
+                },
+                jobs: BTreeMap::new(),
+            },
+        }];
+
+        assert!(matches!(
+            evaluate(&RuleKind::WorkflowExistsForDefaultBranch, &facts),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_exists_for_default_branch_respects_branches_ignore() {
+        let mut facts = base_facts();
+        facts.workflows = vec![WorkflowFile {
+            path: ".github/workflows/ci.yml".to_owned(),
+            workflow: Workflow {
+                name: Some("CI".to_owned()),
+                triggers: Triggers {
+                    push: Some(TriggerFilter {
+                        branches: Vec::new(),
+                        branches_ignore: vec!["main".to_owned()],
+                        paths: Vec::new(),
+                    }),
+                    pull_request: None,
+                    pull_request_target: None,
+                    workflow_dispatch: None,
+                },
+                jobs: BTreeMap::new(),
+            },
+        }];
+
+        assert!(matches!(
+            evaluate(&RuleKind::WorkflowExistsForDefaultBranch, &facts),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
     fn good_snapshot_matches_expected_default_rule_results() {
         let facts = good_fixture();
         let outputs = evaluate_rules(&default_rules(), &facts);
@@ -1390,7 +1576,7 @@ mod tests {
             ("RS004".to_owned(), "pass"),
             ("RS005".to_owned(), "pass"),
             ("RS006".to_owned(), "pass"),
-            ("RS007".to_owned(), "pass"),
+            ("RS007".to_owned(), "skip"),
             ("ST001".to_owned(), "pass"),
             ("ST002".to_owned(), "pass"),
             ("ST003".to_owned(), "pass"),
@@ -1422,7 +1608,7 @@ mod tests {
             ("RS004".to_owned(), "fail"),
             ("RS005".to_owned(), "fail"),
             ("RS006".to_owned(), "fail"),
-            ("RS007".to_owned(), "fail"),
+            ("RS007".to_owned(), "skip"),
             ("ST001".to_owned(), "fail"),
             ("ST002".to_owned(), "fail"),
             ("ST003".to_owned(), "fail"),
