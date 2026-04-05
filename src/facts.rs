@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,7 @@ pub struct RepoFacts {
     pub rulesets: Vec<Ruleset>,
     pub default_branch: BranchName,
     pub workflows: Vec<(String, ())>,
-    pub files_present: HashSet<String>,
+    pub files_present: BTreeSet<String>,
 }
 
 #[cfg(test)]
@@ -35,7 +35,7 @@ mod tests {
             identifier(),
             proptest::collection::vec(identifier(), 0..5),
             identifier(),
-            proptest::collection::hash_set(identifier(), 0..10),
+            proptest::collection::btree_set(identifier(), 0..10),
         )
             .prop_map(
                 |(owner, name, workflow_names, branch, files_present)| RepoFacts {

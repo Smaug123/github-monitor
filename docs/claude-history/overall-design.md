@@ -61,11 +61,11 @@ enum RuleResult {
     Error { reason: String },
 }
 
-struct RuleId(&'static str);  // e.g. "RS001", "WF001", "NX001"
+struct RuleId(String);  // e.g. "RS001", "WF001", "NX001"
 
 struct RuleOutput {
     id: RuleId,
-    name: &'static str,
+    name: String,
     result: RuleResult,
 }
 
@@ -76,7 +76,7 @@ struct RepoFacts {
     rulesets: Vec<Ruleset>,
     default_branch: BranchName,
     workflows: Vec<(String, Workflow)>,  // (filename, parsed workflow)
-    files_present: HashSet<String>,       // paths that exist in the repo
+    files_present: BTreeSet<String>,       // paths that exist in the repo
 }
 
 // Rules as a closed enum
@@ -86,7 +86,7 @@ enum RuleKind {
     RulesetRequiresReviewers { min_count: u32 },
     RulesetEnforcesAdmins,
     RulesetRequiresLinearHistory,
-    RulesetPreventsForce Push,
+    RulesetPreventsForcePush,
     WorkflowExistsForDefaultBranch,
     WorkflowHasJob { job_name: String },
     WorkflowActionsPinnedToSha,
@@ -144,7 +144,7 @@ Deserialized from YAML via `serde_yml`. Must handle GitHub's polymorphism (e.g. 
 ## Implementation stages
 
 ### Stage 1: Config + core types + module skeleton
-- Add dependencies: `serde`, `toml`, `serde_json`, `serde_yml`
+- Add dependencies: `serde`, `toml`, `serde_json`
 - `config.rs`: parse TOML into typed `Config`
 - Newtypes: `Owner`, `RepoName`, `BranchName`, `RuleId`
 - `rules/mod.rs`: `RuleKind`, `RuleResult`, `RuleOutput` types (no evaluation logic yet)
