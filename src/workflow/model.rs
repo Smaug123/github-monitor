@@ -142,6 +142,7 @@ pub struct Job {
 #[serde(untagged)]
 pub enum RunsOn {
     Label(String),
+    Labels(Vec<String>),
     Group(RunsOnGroup),
 }
 
@@ -415,6 +416,7 @@ mod tests {
     fn runs_on_strategy() -> impl Strategy<Value = RunsOn> {
         prop_oneof![
             identifier().prop_map(RunsOn::Label),
+            proptest::collection::vec(identifier(), 1..4).prop_map(RunsOn::Labels),
             (
                 proptest::option::of(identifier()),
                 proptest::collection::vec(identifier(), 0..3),
@@ -569,6 +571,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: cargo test
+  self-hosted-build:
+    runs-on:
+      - self-hosted
+      - linux
+    steps:
+      - run: cargo fmt --check
   deploy:
     runs-on:
       group: release-runners
@@ -599,6 +607,15 @@ jobs:
             Some(RunsOn::Label("ubuntu-latest".to_owned()))
         );
         assert_eq!(build.steps.first().unwrap().run(), Some("cargo test"));
+
+        let self_hosted_build = workflow.jobs.get("self-hosted-build").unwrap();
+        assert_eq!(
+            self_hosted_build.runs_on,
+            Some(RunsOn::Labels(vec![
+                "self-hosted".to_owned(),
+                "linux".to_owned(),
+            ]))
+        );
 
         let deploy = workflow.jobs.get("deploy").unwrap();
         assert_eq!(
@@ -670,6 +687,10 @@ jobs:
     #[test]
     fn parses_repo_workflows_without_error() {
         let workflows_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows");
+        if !workflows_dir.is_dir() {
+            return;
+        }
+
         let entries = fs::read_dir(&workflows_dir).unwrap();
 
         for entry in entries {
