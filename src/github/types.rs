@@ -133,20 +133,35 @@ pub struct RequiredStatusCheck {
     pub integration_id: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepositoryContent {
+pub struct RepositoryFileContent {
+    pub name: String,
+    pub path: String,
+    pub sha: String,
+    #[serde(rename = "type")]
+    pub kind: RepositoryContentType,
+    pub encoding: ContentEncoding,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryDirectoryEntry {
     pub name: String,
     pub path: String,
     pub sha: String,
     #[serde(rename = "type")]
     pub kind: RepositoryContentType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encoding: Option<ContentEncoding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RepositoryContents {
+    File(RepositoryFileContent),
+    Directory(Vec<RepositoryDirectoryEntry>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,5 +311,51 @@ mod tests {
 
         assert_eq!(tree.tree.len(), 1);
         assert_eq!(tree.tree[0].kind, GitTreeEntryType::Blob);
+    }
+
+    #[test]
+    fn deserializes_file_contents_payload() {
+        let file: RepositoryFileContent = serde_json::from_str(
+            r#"
+{
+  "name": "ci.yml",
+  "path": ".github/workflows/ci.yml",
+  "sha": "abc123",
+  "type": "file",
+  "encoding": "base64",
+  "content": "Y2FyZ28gdGVzdAo=",
+  "size": 11
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(file.kind, RepositoryContentType::File);
+        assert_eq!(file.encoding, ContentEncoding::Base64);
+    }
+
+    #[test]
+    fn deserializes_directory_contents_payload() {
+        let contents: RepositoryContents = serde_json::from_str(
+            r#"
+[
+  {
+    "name": "workflows",
+    "path": ".github/workflows",
+    "sha": "def456",
+    "type": "dir"
+  }
+]
+"#,
+        )
+        .unwrap();
+
+        match contents {
+            RepositoryContents::Directory(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].kind, RepositoryContentType::Dir);
+            }
+            RepositoryContents::File(_) => panic!("expected directory contents"),
+        }
     }
 }

@@ -7,7 +7,10 @@ use ureq::http::Response;
 use ureq::http::header::HeaderMap;
 use ureq::{Agent, Body, Error as UreqError};
 
-use crate::github::types::{GitTree, Repository, RepositoryContent, Ruleset};
+use crate::github::types::{
+    GitTree, Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
+    Ruleset,
+};
 use crate::types::RepoRef;
 
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
@@ -16,6 +19,83 @@ const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VE
 const RATE_LIMIT_BUFFER: u32 = 5;
 const MAX_RETRIES: u32 = 3;
 const INITIAL_RETRY_BACKOFF_MS: u64 = 250;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPath {
+    segments: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonRootRepoPath(RepoPath);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoPathError {
+    EmptySegment,
+    RootPathNotAllowed,
+}
+
+impl RepoPath {
+    pub fn root() -> Self {
+        Self {
+            segments: Vec::new(),
+        }
+    }
+
+    pub fn new(path: impl AsRef<str>) -> Result<Self, RepoPathError> {
+        let trimmed = path.as_ref().trim_matches('/');
+        if trimmed.is_empty() {
+            return Ok(Self::root());
+        }
+
+        let segments = trimmed.split('/').map(str::to_owned).collect::<Vec<_>>();
+
+        if segments.iter().any(|segment| segment.is_empty()) {
+            return Err(RepoPathError::EmptySegment);
+        }
+
+        Ok(Self { segments })
+    }
+
+    fn is_root(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    fn to_api_path(&self) -> String {
+        self.segments
+            .iter()
+            .map(|segment| percent_encode_path_segment(segment))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
+impl NonRootRepoPath {
+    pub fn new(path: impl AsRef<str>) -> Result<Self, RepoPathError> {
+        let path = RepoPath::new(path)?;
+        if path.is_root() {
+            return Err(RepoPathError::RootPathNotAllowed);
+        }
+
+        Ok(Self(path))
+    }
+
+    fn as_repo_path(&self) -> &RepoPath {
+        &self.0
+    }
+}
+
+impl fmt::Display for RepoPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptySegment => f.write_str("repository paths must not contain empty segments"),
+            Self::RootPathNotAllowed => {
+                f.write_str("this operation requires a non-root repository path")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RepoPathError {}
 
 #[derive(Debug, Clone)]
 pub struct GitHubClient {
@@ -81,14 +161,34 @@ impl GitHubClient {
         ))
     }
 
-    pub fn get_contents(
+    pub fn get_file_contents(
         &mut self,
         repo: &RepoRef,
-        path: &str,
-    ) -> Result<RepositoryContent, GitHubClientError> {
-        self.get_json(&format!(
-            "{GITHUB_API_BASE_URL}/repos/{repo}/contents/{path}"
-        ))
+        path: &NonRootRepoPath,
+    ) -> Result<RepositoryFileContent, GitHubClientError> {
+        let url = contents_url(repo, path.as_repo_path());
+        match self.get_json::<RepositoryContents>(&url)? {
+            RepositoryContents::File(file) => Ok(file),
+            RepositoryContents::Directory(_) => Err(GitHubClientError::UnexpectedContentsShape {
+                url,
+                expected: "file",
+            }),
+        }
+    }
+
+    pub fn list_directory_contents(
+        &mut self,
+        repo: &RepoRef,
+        path: &RepoPath,
+    ) -> Result<Vec<RepositoryDirectoryEntry>, GitHubClientError> {
+        let url = contents_url(repo, path);
+        match self.get_json::<RepositoryContents>(&url)? {
+            RepositoryContents::Directory(entries) => Ok(entries),
+            RepositoryContents::File(_) => Err(GitHubClientError::UnexpectedContentsShape {
+                url,
+                expected: "directory",
+            }),
+        }
     }
 
     pub fn get_git_tree(
@@ -232,6 +332,10 @@ pub enum GitHubClientError {
         status: u16,
         body: String,
     },
+    UnexpectedContentsShape {
+        url: String,
+        expected: &'static str,
+    },
 }
 
 impl fmt::Display for GitHubClientError {
@@ -248,6 +352,12 @@ impl fmt::Display for GitHubClientError {
                     )
                 }
             }
+            Self::UnexpectedContentsShape { url, expected } => {
+                write!(
+                    f,
+                    "request to {url} returned contents that were not a {expected}"
+                )
+            }
         }
     }
 }
@@ -256,7 +366,7 @@ impl std::error::Error for GitHubClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Request { source, .. } => Some(source),
-            Self::UnexpectedStatus { .. } => None,
+            Self::UnexpectedStatus { .. } | Self::UnexpectedContentsShape { .. } => None,
         }
     }
 }
@@ -389,6 +499,56 @@ fn unix_time_now() -> u64 {
         .as_secs()
 }
 
+fn contents_url(repo: &RepoRef, path: &RepoPath) -> String {
+    let base = format!("{GITHUB_API_BASE_URL}/repos/{repo}/contents");
+    if path.is_root() {
+        base
+    } else {
+        format!("{base}/{}", path.to_api_path())
+    }
+}
+
+fn percent_encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+
+    for byte in segment.bytes() {
+        if is_path_segment_byte_unreserved(byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+
+    encoded
+}
+
+fn is_path_segment_byte_unreserved(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'='
+            | b':'
+            | b'@'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +632,32 @@ mod tests {
         );
         assert_eq!(retry_delay(0, RetryTrigger::Status(404)), None);
         assert_eq!(retry_delay(0, RetryTrigger::Status(429)), None);
+    }
+
+    #[test]
+    fn repo_path_percent_encodes_reserved_characters() {
+        let path = RepoPath::new("/dir name/workflow#1?.yml/").unwrap();
+
+        assert_eq!(path.to_api_path(), "dir%20name/workflow%231%3F.yml");
+    }
+
+    #[test]
+    fn non_root_repo_path_rejects_root() {
+        assert_eq!(
+            NonRootRepoPath::new("/").unwrap_err(),
+            RepoPathError::RootPathNotAllowed
+        );
+    }
+
+    #[test]
+    fn contents_url_encodes_each_path_segment() {
+        let repo = RepoRef::new("owner", "repo");
+        let path = RepoPath::new("dir name/file#1?.txt").unwrap();
+
+        assert_eq!(
+            contents_url(&repo, &path),
+            "https://api.github.com/repos/owner/repo/contents/dir%20name/file%231%3F.txt"
+        );
     }
 
     #[test]
