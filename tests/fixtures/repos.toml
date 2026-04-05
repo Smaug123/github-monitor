@@ -1,0 +1,7 @@
+[[repos]]
+owner = "example-org"
+name = "good-repo"
+
+[[repos]]
+owner = "example-org"
+name = "bad-repo"

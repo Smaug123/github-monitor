@@ -1,0 +1,47 @@
+{
+  "repo": {
+    "owner": "example-org",
+    "name": "bad-repo"
+  },
+  "settings": {
+    "private": false,
+    "archived": false,
+    "disabled": false,
+    "allow_auto_merge": false,
+    "delete_branch_on_merge": false,
+    "allow_update_branch": false,
+    "allow_squash_merge": true,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": false
+  },
+  "rulesets": [],
+  "default_branch": "main",
+  "workflows": [
+    {
+      "path": ".github/workflows/unsafe.yml",
+      "workflow": {
+        "name": "Unsafe CI",
+        "on": {
+          "pull_request_target": {}
+        },
+        "jobs": {
+          "build": {
+            "runs-on": "ubuntu-latest",
+            "steps": [
+              {
+                "uses": "actions/checkout@v4"
+              },
+              {
+                "run": "echo unsafe"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "files_present": [
+    ".github/workflows/unsafe.yml",
+    "README.md"
+  ]
+}
