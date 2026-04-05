@@ -1,0 +1,93 @@
+{
+  "repo": {
+    "owner": "example-org",
+    "name": "good-repo"
+  },
+  "settings": {
+    "private": false,
+    "archived": false,
+    "disabled": false,
+    "allow_auto_merge": true,
+    "delete_branch_on_merge": true,
+    "allow_update_branch": true,
+    "allow_squash_merge": true,
+    "allow_merge_commit": false,
+    "allow_rebase_merge": true
+  },
+  "rulesets": [
+    {
+      "id": 1,
+      "name": "main protection",
+      "target": "branch",
+      "enforcement": "active",
+      "rules": [
+        {
+          "type": "required_status_checks",
+          "parameters": {
+            "required_status_checks": [
+              {
+                "context": "ci"
+              }
+            ],
+            "strict_required_status_checks_policy": true
+          }
+        },
+        {
+          "type": "pull_request",
+          "parameters": {
+            "required_approving_review_count": 2,
+            "require_code_owner_review": true,
+            "required_review_thread_resolution": true
+          }
+        },
+        {
+          "type": "required_linear_history"
+        },
+        {
+          "type": "non_fast_forward"
+        }
+      ]
+    }
+  ],
+  "default_branch": "main",
+  "workflows": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "workflow": {
+        "name": "CI",
+        "on": {
+          "push": {
+            "branches": [
+              "main"
+            ]
+          },
+          "pull_request": {
+            "branches": [
+              "main"
+            ]
+          }
+        },
+        "jobs": {
+          "build-and-test": {
+            "runs-on": "ubuntu-latest",
+            "steps": [
+              {
+                "uses": "actions/checkout@0123456789abcdef0123456789abcdef01234567"
+              },
+              {
+                "name": "Build",
+                "run": "cargo test"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "files_present": [
+    ".github/workflows/ci.yml",
+    "CODEOWNERS",
+    "flake.lock",
+    "flake.nix"
+  ]
+}
