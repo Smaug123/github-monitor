@@ -19,14 +19,37 @@ const INITIAL_RETRY_BACKOFF_MS: u64 = 250;
 
 #[derive(Debug, Clone)]
 pub struct GitHubClient {
-    token: String,
+    token: GitHubToken,
     rate_limit: RateLimitState,
     agent: Agent,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct GitHubToken(String);
+
+impl GitHubToken {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    pub fn from_env(var_name: &str) -> Option<Self> {
+        std::env::var(var_name).ok().map(Self)
+    }
+
+    fn as_bearer_header(&self) -> String {
+        format!("Bearer {}", self.0)
+    }
+}
+
+impl fmt::Debug for GitHubToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GitHubToken([REDACTED])")
+    }
+}
+
 #[allow(dead_code)]
 impl GitHubClient {
-    pub fn new(token: String) -> Self {
+    pub fn new(token: GitHubToken) -> Self {
         let agent: Agent = Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(30)))
@@ -172,7 +195,7 @@ impl GitHubClient {
         self.agent
             .get(url)
             .header("Accept", "application/vnd.github+json")
-            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Authorization", self.token.as_bearer_header())
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .header("User-Agent", USER_AGENT)
             .call()
@@ -452,9 +475,25 @@ mod tests {
     }
 
     #[test]
+    fn token_debug_is_redacted() {
+        let token = GitHubToken::new("ghp_secret_token");
+
+        assert_eq!(format!("{token:?}"), "GitHubToken([REDACTED])");
+    }
+
+    #[test]
+    fn client_debug_redacts_token() {
+        let client = GitHubClient::new(GitHubToken::new("ghp_secret_token"));
+        let debug = format!("{client:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("ghp_secret_token"));
+    }
+
+    #[test]
     #[ignore = "requires GITHUB_TOKEN and network access"]
     fn fetches_public_repo_metadata() {
-        let token = std::env::var("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set");
+        let token = GitHubToken::from_env("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set");
         let mut client = GitHubClient::new(token);
         let repo = client
             .get_repo(&RepoRef::new("rust-lang", "cargo"))

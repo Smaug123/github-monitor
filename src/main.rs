@@ -6,8 +6,10 @@ mod rules;
 mod types;
 mod workflow;
 
-fn github_token_from_env() -> Option<String> {
-    std::env::var("GITHUB_TOKEN").ok()
+use crate::github::client::GitHubToken;
+
+fn github_token_from_env() -> Option<GitHubToken> {
+    GitHubToken::from_env("GITHUB_TOKEN")
 }
 
 fn main() {
