@@ -595,11 +595,13 @@ fn github_pattern_to_regex(pattern: &str) -> Option<String> {
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut regex = String::new();
     let mut index = 0usize;
+    let mut previous_token_is_quantifiable = false;
     while index < chars.len() {
         match chars[index] {
             '\\' => {
                 let escaped = chars.get(index + 1).copied().unwrap_or('\\');
                 push_escaped_char(&mut regex, escaped);
+                previous_token_is_quantifiable = true;
                 index += if index + 1 < chars.len() { 2 } else { 1 };
             }
             '*' => {
@@ -610,26 +612,26 @@ fn github_pattern_to_regex(pattern: &str) -> Option<String> {
                     regex.push_str("[^/]*");
                     index += 1;
                 }
+                previous_token_is_quantifiable = false;
             }
-            '?' => {
-                regex.push_str("[^/]");
-                index += 1;
-            }
-            '+' => {
-                if chars.get(index + 1) == Some(&'(') {
+            '?' | '+' => {
+                if !previous_token_is_quantifiable {
                     return None;
-                } else {
-                    push_escaped_char(&mut regex, chars[index]);
                 }
+
+                regex.push(chars[index]);
+                previous_token_is_quantifiable = false;
                 index += 1;
             }
             '[' => {
                 let (class_regex, next_index) = parse_character_class(&chars, index)?;
                 regex.push_str(&class_regex);
+                previous_token_is_quantifiable = true;
                 index = next_index;
             }
             ch => {
                 push_escaped_char(&mut regex, ch);
+                previous_token_is_quantifiable = true;
                 index += 1;
             }
         }
@@ -639,51 +641,60 @@ fn github_pattern_to_regex(pattern: &str) -> Option<String> {
 }
 
 fn parse_character_class(chars: &[char], start: usize) -> Option<(String, usize)> {
-    let mut end = start + 1;
-    while end < chars.len() {
-        if chars[end] == ']' && end > start + 1 {
-            break;
-        }
-        end += 1;
-    }
-
-    if end >= chars.len() || chars[end] != ']' {
-        return None;
-    }
-
     let mut regex = String::from("[");
     let mut index = start + 1;
+    let mut saw_content = false;
 
     if chars.get(index) == Some(&'!') {
         regex.push('^');
         index += 1;
     }
 
-    while index < end {
+    while index < chars.len() {
         match chars[index] {
             '\\' => {
-                regex.push('\\');
-                regex.push(chars.get(index + 1).copied().unwrap_or('\\'));
-                index += if index + 1 < end { 2 } else { 1 };
+                let escaped = chars.get(index + 1).copied().unwrap_or('\\');
+                push_regex_class_literal(&mut regex, escaped);
+                saw_content = true;
+                index += if index + 1 < chars.len() { 2 } else { 1 };
             }
-            ']' | '[' | '^' => {
-                regex.push('\\');
-                regex.push(chars[index]);
+            ']' if saw_content => {
+                regex.push(']');
+                return Some((regex, index + 1));
+            }
+            '[' | '^' => {
+                push_regex_class_literal(&mut regex, chars[index]);
+                saw_content = true;
+                index += 1;
+            }
+            '-' => {
+                regex.push('-');
+                saw_content = true;
                 index += 1;
             }
             ch => {
                 regex.push(ch);
+                saw_content = true;
                 index += 1;
             }
         }
     }
 
-    regex.push(']');
-    Some((regex, end + 1))
+    None
 }
 
 fn push_escaped_char(regex: &mut String, ch: char) {
     regex.push_str(&regex::escape(&ch.to_string()));
+}
+
+fn push_regex_class_literal(regex: &mut String, ch: char) {
+    match ch {
+        '\\' | '[' | ']' | '^' | '-' => {
+            regex.push('\\');
+            regex.push(ch);
+        }
+        _ => regex.push(ch),
+    }
 }
 
 fn workflow_uses_action(workflow: &Workflow, action: &str) -> bool {
@@ -1174,6 +1185,12 @@ mod tests {
     fn glob_pattern_subset_strategy() -> impl Strategy<Value = String> {
         let literal = proptest::collection::vec(glob_literal_char_strategy(), 1..=3)
             .prop_map(|chars| chars.into_iter().collect::<String>());
+        let quantified_literal = (
+            glob_literal_char_strategy()
+                .prop_filter("wildcards are not quantifiable literals", |ch| *ch != '*'),
+            prop_oneof![Just('?'), Just('+')],
+        )
+            .prop_map(|(ch, quantifier)| format!("{ch}{quantifier}"));
         let escaped = prop_oneof![
             Just("\\*".to_owned()),
             Just("\\?".to_owned()),
@@ -1187,9 +1204,9 @@ mod tests {
         proptest::collection::vec(
             prop_oneof![
                 literal,
+                quantified_literal,
                 Just("*".to_owned()),
                 Just("**".to_owned()),
-                Just("?".to_owned()),
                 escaped,
             ],
             0..8,
@@ -1359,13 +1376,45 @@ mod tests {
                                     go(pattern, pattern_index + 1, branch, next_branch_index, memo)
                                 })
                     }
-                    '?' => {
-                        branch.get(branch_index).is_some_and(|ch| *ch != '/')
-                            && go(pattern, pattern_index + 1, branch, branch_index + 1, memo)
-                    }
                     ch => {
-                        branch.get(branch_index) == Some(&ch)
-                            && go(pattern, pattern_index + 1, branch, branch_index + 1, memo)
+                        let (min_count, max_count, next_pattern_index) =
+                            match pattern.get(pattern_index + 1).copied() {
+                                Some('?') => (0usize, 1usize, pattern_index + 2),
+                                Some('+') => (1usize, usize::MAX, pattern_index + 2),
+                                _ => {
+                                    return branch.get(branch_index) == Some(&ch)
+                                        && go(
+                                            pattern,
+                                            pattern_index + 1,
+                                            branch,
+                                            branch_index + 1,
+                                            memo,
+                                        );
+                                }
+                            };
+
+                        let mut matched_count = 0usize;
+                        let mut next_branch_index = branch_index;
+
+                        while next_branch_index < branch.len() && branch[next_branch_index] == ch {
+                            matched_count += 1;
+                            next_branch_index += 1;
+                        }
+
+                        if matched_count < min_count {
+                            false
+                        } else {
+                            let upper_bound = matched_count.min(max_count);
+                            (min_count..=upper_bound).any(|count| {
+                                go(
+                                    pattern,
+                                    next_pattern_index,
+                                    branch,
+                                    branch_index + count,
+                                    memo,
+                                )
+                            })
+                        }
                     }
                 }
             };
@@ -1753,33 +1802,29 @@ mod tests {
     }
 
     #[test]
-    fn workflow_exists_for_default_branch_treats_question_mark_as_single_char_wildcard() {
-        let mut facts = base_facts();
-        facts.default_branch = BranchName::new("release/x");
-        facts.workflows = vec![WorkflowFile {
-            path: ".github/workflows/release.yml".to_owned(),
-            workflow: Workflow {
-                name: Some("Release".to_owned()),
-                triggers: Triggers {
-                    push: Some(TriggerFilter {
-                        branches: vec!["release/?".to_owned()],
-                        branches_ignore: Vec::new(),
-                        tags: Vec::new(),
-                        tags_ignore: Vec::new(),
-                        paths: Vec::new(),
-                    }),
-                    pull_request: None,
-                    pull_request_target: None,
-                    workflow_dispatch: None,
-                },
-                jobs: BTreeMap::new(),
-            },
-        }];
+    fn branch_pattern_matches_treats_question_mark_as_postfix_quantifier() {
+        assert!(branch_pattern_matches("releasex?", "release"));
+        assert!(branch_pattern_matches("releasex?", "releasex"));
+        assert!(!branch_pattern_matches("releasex?", "releasexx"));
+    }
 
-        assert_eq!(
-            evaluate(&RuleKind::WorkflowExistsForDefaultBranch, &facts),
-            RuleResult::Pass
-        );
+    #[test]
+    fn branch_pattern_matches_supports_plus_followed_by_literal_paren() {
+        assert!(branch_pattern_matches("ab+(", "ab("));
+        assert!(branch_pattern_matches("ab+(", "abbb("));
+        assert!(!branch_pattern_matches("ab+(", "a("));
+    }
+
+    #[test]
+    fn branch_pattern_matches_supports_escaped_closing_bracket_in_character_class() {
+        assert!(branch_pattern_matches(r"[\]]", "]"));
+        assert!(!branch_pattern_matches(r"[\]]", "\\"));
+    }
+
+    #[test]
+    fn branch_pattern_matches_treats_backslash_escapes_in_character_class_as_literals() {
+        assert!(branch_pattern_matches(r"[\d]", "d"));
+        assert!(!branch_pattern_matches(r"[\d]", "5"));
     }
 
     #[test]
