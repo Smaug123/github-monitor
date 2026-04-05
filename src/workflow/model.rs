@@ -509,10 +509,12 @@ mod tests {
         fn workflow_yaml_roundtrip(workflow in workflow_strategy()) {
             let first_yaml = serde_yml::to_string(&workflow).unwrap();
             let first: Workflow = serde_yml::from_str(&first_yaml).unwrap();
+            prop_assert_eq!(&first, &workflow);
+
             let second_yaml = serde_yml::to_string(&first).unwrap();
             let second: Workflow = serde_yml::from_str(&second_yaml).unwrap();
 
-            prop_assert_eq!(second, first);
+            prop_assert_eq!(&second, &first);
         }
 
         #[test]
