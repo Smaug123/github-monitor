@@ -725,7 +725,7 @@ fn action_reference_is_pinned_to_sha(uses: &ActionReference) -> bool {
         ActionReference::Other(raw) => {
             if raw.starts_with("./") || raw.starts_with("docker://") {
                 true
-            } else if let Some((_, version)) = raw.rsplit_once('@') {
+            } else if let Some((_, version)) = raw.split_once('@') {
                 is_commit_sha(version)
             } else {
                 false
@@ -1807,6 +1807,22 @@ mod tests {
 
         assert!(matches!(
             evaluate(&RuleKind::WorkflowExistsForDefaultBranch, &facts),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn workflow_actions_pinned_to_sha_fails_for_subdir_action_with_at_in_ref() {
+        let mut facts = base_facts();
+        facts.workflows = vec![workflow_with_single_job(
+            "build",
+            vec![action_step(ActionReference::Other(
+                "owner/repo/path@feature@0123456789abcdef0123456789abcdef01234567".to_owned(),
+            ))],
+        )];
+
+        assert!(matches!(
+            evaluate(&RuleKind::WorkflowActionsPinnedToSha, &facts),
             RuleResult::Fail { .. }
         ));
     }
