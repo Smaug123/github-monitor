@@ -261,7 +261,7 @@ impl FromStr for ActionRef {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (path, version) = s
-            .rsplit_once('@')
+            .split_once('@')
             .ok_or_else(|| ParseActionRefError::new(s))?;
 
         let mut path_parts = path.split('/');
@@ -385,7 +385,7 @@ mod tests {
     }
 
     fn version() -> impl Strategy<Value = String> {
-        "[A-Za-z0-9._/-]{1,20}"
+        "[A-Za-z0-9._/@-]{1,20}"
     }
 
     fn trigger_filter_strategy() -> impl Strategy<Value = TriggerFilter> {
@@ -522,6 +522,14 @@ mod tests {
             let reparsed: ActionRef = action_ref.to_string().parse().unwrap();
             prop_assert_eq!(reparsed, action_ref);
         }
+    }
+
+    #[test]
+    fn parses_action_ref_with_at_in_version() {
+        let action_ref: ActionRef = "owner/repo@feature@123".parse().unwrap();
+
+        assert_eq!(action_ref, ActionRef::new("owner", "repo", "feature@123"));
+        assert_eq!(action_ref.to_string(), "owner/repo@feature@123");
     }
 
     #[test]
