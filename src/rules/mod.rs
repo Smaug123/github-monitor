@@ -534,14 +534,11 @@ fn ruleset_conditions_include_branch(
 }
 
 fn ref_name_includes_branch(ref_name: &RefNameCondition, default_branch: &str) -> bool {
-    if ref_name.include.is_empty() {
-        return true;
-    }
-
-    let included = ref_name
-        .include
-        .iter()
-        .any(|pattern| ref_name_pattern_matches(pattern, default_branch));
+    let included = ref_name.include.is_empty()
+        || ref_name
+            .include
+            .iter()
+            .any(|pattern| ref_name_pattern_matches(pattern, default_branch));
 
     if !included {
         return false;
@@ -2163,6 +2160,25 @@ mod tests {
         ruleset.conditions = Some(RulesetConditions {
             ref_name: Some(RefNameCondition {
                 include: vec!["~ALL".to_owned()],
+                exclude: vec!["main".to_owned()],
+            }),
+        });
+        facts.rulesets = vec![ruleset];
+
+        assert!(matches!(
+            evaluate(&RuleKind::RulesetExists, &facts),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn ruleset_with_empty_include_still_honors_exclude_patterns() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("main");
+        let mut ruleset = active_branch_ruleset(Vec::new());
+        ruleset.conditions = Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: Vec::new(),
                 exclude: vec!["main".to_owned()],
             }),
         });
