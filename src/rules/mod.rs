@@ -9,7 +9,7 @@ use crate::github::types::{
 use crate::types::RuleId;
 use crate::workflow::model::{ActionReference, Step, Workflow};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepoSetting {
     Private,
     Archived,
@@ -23,7 +23,7 @@ pub enum RepoSetting {
 }
 
 impl RepoSetting {
-    fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Private => "private",
             Self::Archived => "archived",
@@ -35,6 +35,17 @@ impl RepoSetting {
             Self::AllowMergeCommit => "allow_merge_commit",
             Self::AllowRebaseMerge => "allow_rebase_merge",
         }
+    }
+
+    pub(crate) fn is_safe_to_auto_fix(&self) -> bool {
+        matches!(
+            self,
+            Self::AllowAutoMerge
+                | Self::DeleteBranchOnMerge
+                | Self::AllowUpdateBranch
+                | Self::AllowMergeCommit
+                | Self::AllowRebaseMerge
+        )
     }
 
     fn read(&self, settings: &RepoSettings) -> SettingValue {
@@ -60,9 +71,15 @@ pub enum SettingValue {
 }
 
 impl SettingValue {
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             Self::Bool(value) => value.to_string(),
+        }
+    }
+
+    pub(crate) fn as_bool(&self) -> bool {
+        match self {
+            Self::Bool(value) => *value,
         }
     }
 }

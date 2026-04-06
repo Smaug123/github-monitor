@@ -78,6 +78,42 @@ pub struct Repository {
     pub allow_rebase_merge: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RepositoryUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_auto_merge: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_branch_on_merge: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_update_branch: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_squash_merge: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_merge_commit: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_rebase_merge: Option<bool>,
+}
+
+impl RepositoryUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.private.is_none()
+            && self.archived.is_none()
+            && self.disabled.is_none()
+            && self.allow_auto_merge.is_none()
+            && self.delete_branch_on_merge.is_none()
+            && self.allow_update_branch.is_none()
+            && self.allow_squash_merge.is_none()
+            && self.allow_merge_commit.is_none()
+            && self.allow_rebase_merge.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ruleset {
     pub id: u64,
@@ -329,6 +365,20 @@ mod tests {
         .unwrap();
 
         assert!(ruleset.conditions.is_none());
+    }
+
+    #[test]
+    fn serializes_repository_update_without_unset_fields() {
+        let update = RepositoryUpdate {
+            allow_auto_merge: Some(true),
+            allow_merge_commit: Some(false),
+            ..RepositoryUpdate::default()
+        };
+
+        assert_eq!(
+            serde_json::to_string(&update).unwrap(),
+            r#"{"allow_auto_merge":true,"allow_merge_commit":false}"#
+        );
     }
 
     #[test]

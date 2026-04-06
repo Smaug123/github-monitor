@@ -1,6 +1,7 @@
 mod config;
 mod facts;
 mod github;
+mod remediation;
 mod report;
 mod rules;
 mod types;
@@ -14,6 +15,7 @@ use crate::facts::{
     FactsError, RepoFacts, SnapshotError, gather_repo_facts, load_snapshot, save_snapshot,
 };
 use crate::github::client::{GitHubClient, GitHubToken};
+use crate::remediation::{PlannedFix, RepoFix, execute_repo_fixes, plan_repo_fixes};
 use crate::report::{OutputFormat, OutputFormatError, RepoReport, ReportError};
 use crate::rules::{default_rules, evaluate_rules};
 use crate::types::RepoRef;
@@ -43,8 +45,13 @@ fn try_main() -> Result<ExitCode, MainError> {
 
 fn run(args: CliArgs) -> Result<RunOutput, AppError> {
     let config = Config::from_path(&args.config_path)?;
-    let facts = load_facts(&config, &args.snapshot_mode)?;
-    let reports = evaluate_repo_reports(facts);
+    let reports = match args.execution_mode {
+        ExecutionMode::Plan => {
+            let facts = load_facts(&config, &args.snapshot_mode)?;
+            evaluate_repo_reports(facts, build_planned_repo_fixes)
+        }
+        ExecutionMode::Execute => execute_fix_run(&config, &args.snapshot_mode)?,
+    };
     let rendered = report::render(args.format, &reports)?;
 
     Ok(RunOutput { reports, rendered })
@@ -74,11 +81,18 @@ fn gather_facts_from_github(repos: &[RepoRef]) -> Result<Vec<RepoFacts>, AppErro
         env_var: GITHUB_TOKEN_ENV,
     })?;
     let mut client = GitHubClient::new(token);
+    gather_facts_from_github_with_client(&mut client, repos)
+}
+
+fn gather_facts_from_github_with_client(
+    client: &mut GitHubClient,
+    repos: &[RepoRef],
+) -> Result<Vec<RepoFacts>, AppError> {
     let mut facts = Vec::with_capacity(repos.len());
 
     for repo in repos {
         let repo_facts =
-            gather_repo_facts(&mut client, repo.clone()).map_err(|source| AppError::Facts {
+            gather_repo_facts(client, repo.clone()).map_err(|source| AppError::Facts {
                 repo: repo.clone(),
                 source: Box::new(source),
             })?;
@@ -88,15 +102,79 @@ fn gather_facts_from_github(repos: &[RepoRef]) -> Result<Vec<RepoFacts>, AppErro
     Ok(facts)
 }
 
-fn evaluate_repo_reports(facts: Vec<RepoFacts>) -> Vec<RepoReport> {
+fn execute_fix_run(
+    config: &Config,
+    snapshot_mode: &SnapshotMode,
+) -> Result<Vec<RepoReport>, AppError> {
+    let repos = config.repo_refs();
+    let token = github_token_from_env().ok_or(AppError::MissingGitHubToken {
+        env_var: GITHUB_TOKEN_ENV,
+    })?;
+    let mut client = GitHubClient::new(token);
+    let initial_facts = gather_facts_from_github_with_client(&mut client, &repos)?;
+    let planned_fixes = plan_repo_fix_batches(&initial_facts);
+
+    if planned_fixes.iter().all(Vec::is_empty) {
+        save_facts_if_requested(snapshot_mode, &initial_facts)?;
+        return Ok(evaluate_repo_reports(initial_facts, |facts| {
+            vec![Vec::new(); facts.len()]
+        }));
+    }
+
+    let executed_fixes = planned_fixes
+        .iter()
+        .map(|fixes| execute_repo_fixes(&mut client, fixes))
+        .collect::<Vec<_>>();
+    let final_facts = gather_facts_from_github_with_client(&mut client, &repos)?;
+    save_facts_if_requested(snapshot_mode, &final_facts)?;
+
+    Ok(evaluate_repo_reports(final_facts, move |_| {
+        executed_fixes.clone()
+    }))
+}
+
+fn save_facts_if_requested(
+    snapshot_mode: &SnapshotMode,
+    facts: &[RepoFacts],
+) -> Result<(), AppError> {
+    if let SnapshotMode::Save(snapshot_dir) = snapshot_mode {
+        for repo_facts in facts {
+            save_snapshot(snapshot_dir, repo_facts)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn evaluate_repo_reports<F>(facts: Vec<RepoFacts>, repo_fixes: F) -> Vec<RepoReport>
+where
+    F: FnOnce(&[RepoFacts]) -> Vec<Vec<RepoFix>>,
+{
+    let rules = default_rules();
+    let repo_fixes = repo_fixes(&facts);
+    debug_assert_eq!(facts.len(), repo_fixes.len());
+
+    std::iter::zip(facts, repo_fixes)
+        .map(|(repo_facts, fixes)| {
+            let outputs = evaluate_rules(&rules, &repo_facts);
+            RepoReport::new(repo_facts.repo, outputs, fixes)
+        })
+        .collect()
+}
+
+fn build_planned_repo_fixes(facts: &[RepoFacts]) -> Vec<Vec<RepoFix>> {
+    plan_repo_fix_batches(facts)
+        .into_iter()
+        .map(|fixes| fixes.into_iter().map(|fix| fix.planned_report()).collect())
+        .collect()
+}
+
+fn plan_repo_fix_batches(facts: &[RepoFacts]) -> Vec<Vec<PlannedFix>> {
     let rules = default_rules();
 
     facts
-        .into_iter()
-        .map(|repo_facts| {
-            let outputs = evaluate_rules(&rules, &repo_facts);
-            RepoReport::new(repo_facts.repo, outputs)
-        })
+        .iter()
+        .map(|repo_facts| plan_repo_fixes(&rules, repo_facts))
         .collect()
 }
 
@@ -105,6 +183,7 @@ struct CliArgs {
     config_path: PathBuf,
     snapshot_mode: SnapshotMode,
     format: OutputFormat,
+    execution_mode: ExecutionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +191,12 @@ enum SnapshotMode {
     None,
     Save(PathBuf),
     Load(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionMode {
+    Plan,
+    Execute,
 }
 
 fn parse_cli_args<I, S>(args: I) -> Result<CliArgs, CliError>
@@ -124,6 +209,7 @@ where
     let mut snapshot_save = None;
     let mut snapshot_load = None;
     let mut format = OutputFormat::Text;
+    let mut execution_mode = ExecutionMode::Plan;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -140,6 +226,7 @@ where
                 let raw = next_arg_value(&mut args, "--format")?;
                 format = OutputFormat::parse(&raw).map_err(CliError::InvalidFormat)?;
             }
+            "--fix" => execution_mode = ExecutionMode::Execute,
             other => return Err(CliError::UnknownArgument(other.to_owned())),
         }
     }
@@ -153,10 +240,15 @@ where
         (None, None) => SnapshotMode::None,
     };
 
+    if execution_mode == ExecutionMode::Execute && matches!(snapshot_mode, SnapshotMode::Load(_)) {
+        return Err(CliError::FixRequiresLiveGitHub);
+    }
+
     Ok(CliArgs {
         config_path,
         snapshot_mode,
         format,
+        execution_mode,
     })
 }
 
@@ -172,6 +264,7 @@ enum CliError {
     MissingRequiredArgument(&'static str),
     MissingValue(&'static str),
     ConflictingSnapshotModes,
+    FixRequiresLiveGitHub,
     InvalidFormat(OutputFormatError),
     UnknownArgument(String),
 }
@@ -183,6 +276,9 @@ impl std::fmt::Display for CliError {
             Self::MissingValue(flag) => write!(f, "missing value for argument {flag}"),
             Self::ConflictingSnapshotModes => {
                 f.write_str("only one of --snapshot-save or --snapshot-load may be provided")
+            }
+            Self::FixRequiresLiveGitHub => {
+                f.write_str("--fix may not be used with --snapshot-load because fixes require live GitHub access")
             }
             Self::InvalidFormat(source) => source.fmt(f),
             Self::UnknownArgument(arg) => write!(f, "unknown argument {arg}"),
@@ -197,6 +293,7 @@ impl std::error::Error for CliError {
             Self::MissingRequiredArgument(_)
             | Self::MissingValue(_)
             | Self::ConflictingSnapshotModes
+            | Self::FixRequiresLiveGitHub
             | Self::UnknownArgument(_) => None,
         }
     }
@@ -296,7 +393,7 @@ struct RunOutput {
 
 impl RunOutput {
     fn exit_code(&self) -> ExitCode {
-        if report::has_failures(&self.reports) {
+        if report::has_failures(&self.reports) || report::has_failed_fixes(&self.reports) {
             ExitCode::from(1)
         } else {
             ExitCode::SUCCESS
@@ -328,6 +425,7 @@ mod tests {
                 config_path: PathBuf::from("tests/fixtures/repos.toml"),
                 snapshot_mode: SnapshotMode::Load(PathBuf::from("tests/fixtures")),
                 format: OutputFormat::Text,
+                execution_mode: ExecutionMode::Plan,
             }
         );
     }
@@ -350,7 +448,39 @@ mod tests {
                 config_path: PathBuf::from("tests/fixtures/repos.toml"),
                 snapshot_mode: SnapshotMode::Load(PathBuf::from("tests/fixtures")),
                 format: OutputFormat::Json,
+                execution_mode: ExecutionMode::Plan,
             }
+        );
+    }
+
+    #[test]
+    fn parses_fix_cli_flag() {
+        let args = parse_cli_args(["--config", "tests/fixtures/repos.toml", "--fix"]).unwrap();
+
+        assert_eq!(
+            args,
+            CliArgs {
+                config_path: PathBuf::from("tests/fixtures/repos.toml"),
+                snapshot_mode: SnapshotMode::None,
+                format: OutputFormat::Text,
+                execution_mode: ExecutionMode::Execute,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_fix_with_snapshot_load() {
+        assert_eq!(
+            parse_cli_args([
+                "--config",
+                "tests/fixtures/repos.toml",
+                "--snapshot-load",
+                "tests/fixtures",
+                "--fix",
+            ])
+            .unwrap_err()
+            .to_string(),
+            "--fix may not be used with --snapshot-load because fixes require live GitHub access"
         );
     }
 
@@ -371,6 +501,7 @@ mod tests {
             config_path: fixture_path("tests/fixtures/good-repo.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
             format: OutputFormat::Text,
+            execution_mode: ExecutionMode::Plan,
         })
         .unwrap();
 
@@ -390,6 +521,7 @@ mod tests {
             config_path: fixture_path("tests/fixtures/repos.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
             format: OutputFormat::Text,
+            execution_mode: ExecutionMode::Plan,
         })
         .unwrap();
 
@@ -404,6 +536,7 @@ mod tests {
             config_path: fixture_path("tests/fixtures/repos.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
             format: OutputFormat::Json,
+            execution_mode: ExecutionMode::Plan,
         })
         .unwrap();
 
@@ -427,6 +560,7 @@ mod tests {
             config_path: fixture_path("tests/fixtures/good-repo.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
             format: OutputFormat::Json,
+            execution_mode: ExecutionMode::Plan,
         })
         .unwrap();
 
@@ -440,6 +574,7 @@ mod tests {
             let obj = entry.as_object().expect("each entry should be an object");
             assert!(obj.contains_key("repo"), "entry missing 'repo' key");
             assert!(obj.contains_key("rules"), "entry missing 'rules' key");
+            assert!(obj.contains_key("fixes"), "entry missing 'fixes' key");
             let rules = obj["rules"].as_array().expect("'rules' should be an array");
             for rule in rules {
                 let rule_obj = rule.as_object().expect("each rule should be an object");
@@ -451,5 +586,20 @@ mod tests {
 
         // Also confirm it round-trips through the typed schema.
         let _decoded: Vec<RepoReport> = serde_json::from_str(&output.rendered).unwrap();
+    }
+
+    #[test]
+    fn snapshot_plan_run_lists_planned_fixes_for_fixable_failures() {
+        let output = run(CliArgs {
+            config_path: fixture_path("tests/fixtures/repos.toml"),
+            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
+            format: OutputFormat::Text,
+            execution_mode: ExecutionMode::Plan,
+        })
+        .unwrap();
+
+        assert!(output.rendered.contains("Fixes:"));
+        assert!(output.rendered.contains("PLANNED  ST001"));
+        assert!(output.rendered.contains("PLANNED  ST005"));
     }
 }
