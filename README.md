@@ -209,7 +209,6 @@ The default rule set is currently fixed in code.
 | --- | --- |
 | `RS001` | At least one active branch ruleset applies to the default branch |
 | `RS002` | An active branch ruleset requires the `ci` status check |
-| `RS003` | An active branch ruleset requires at least two approving reviews |
 | `RS004` | Organization admins and repository roles cannot bypass active branch rulesets |
 | `RS005` | Active branch rulesets require linear history |
 | `RS006` | Active branch rulesets prevent force pushes |
@@ -217,7 +216,6 @@ The default rule set is currently fixed in code.
 | `WF001` | At least one workflow runs on pushes to the default branch |
 | `WF002` | GitHub Actions references are pinned to 40-character commit SHAs |
 | `WF003` | `pull_request_target` workflows do not use `actions/checkout` |
-| `FL001` | `CODEOWNERS` exists at the repository root |
 | `NX001` | `flake.nix` exists |
 | `NX002` | The flake has observable check coverage |
 | `ST001` | `allow_auto_merge = true` |

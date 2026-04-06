@@ -73,9 +73,6 @@ pub enum RuleKind {
     RulesetRequiresStatusCheck {
         check_name: String,
     },
-    RulesetRequiresReviewers {
-        min_count: u32,
-    },
     RulesetEnforcesAdmins,
     RulesetRequiresLinearHistory,
     RulesetPreventsForcePush,
@@ -151,11 +148,6 @@ pub fn default_rules() -> Vec<Rule> {
             },
         ),
         Rule::new(
-            "RS003",
-            "Two approving reviews are required",
-            RuleKind::RulesetRequiresReviewers { min_count: 2 },
-        ),
-        Rule::new(
             "RS004",
             "Organization admins or repository roles cannot bypass rulesets",
             RuleKind::RulesetEnforcesAdmins,
@@ -189,13 +181,6 @@ pub fn default_rules() -> Vec<Rule> {
             "WF003",
             "No pull_request_target workflow checks out code",
             RuleKind::NoPullRequestTargetWithCheckout,
-        ),
-        Rule::new(
-            "FL001",
-            "CODEOWNERS exists",
-            RuleKind::FileExists {
-                path: "CODEOWNERS".to_owned(),
-            },
         ),
         Rule::new("NX001", "flake.nix exists", RuleKind::NixFlakeExists),
         Rule::new(
@@ -284,33 +269,6 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 RuleResult::Fail {
                     reason: format!(
                         "no active branch ruleset requires status check `{check_name}`"
-                    ),
-                }
-            }
-        }
-        RuleKind::RulesetRequiresReviewers { min_count } => {
-            if !has_active_branch_ruleset_for_default_branch(facts) {
-                return RuleResult::Fail {
-                    reason: "no active branch ruleset was found".to_owned(),
-                };
-            }
-
-            if active_branch_rulesets_for_default_branch(facts).any(|ruleset| {
-                ruleset.rules.iter().any(|rule| {
-                    rule.kind == RulesetRuleType::PullRequest
-                        && rule.parameters.as_ref().is_some_and(|parameters| {
-                            parameters
-                                .required_approving_review_count
-                                .unwrap_or_default()
-                                >= *min_count
-                        })
-                })
-            }) {
-                RuleResult::Pass
-            } else {
-                RuleResult::Fail {
-                    reason: format!(
-                        "no active branch ruleset requires at least {min_count} approving reviews"
                     ),
                 }
             }
@@ -1204,7 +1162,6 @@ mod tests {
         prop_oneof![
             Just(RuleKind::RulesetExists),
             identifier().prop_map(|check_name| RuleKind::RulesetRequiresStatusCheck { check_name }),
-            (0u32..5).prop_map(|min_count| RuleKind::RulesetRequiresReviewers { min_count }),
             Just(RuleKind::RulesetEnforcesAdmins),
             Just(RuleKind::RulesetRequiresLinearHistory),
             Just(RuleKind::RulesetPreventsForcePush),
@@ -1975,12 +1932,10 @@ mod tests {
             .map(|output| (output.id.to_string(), result_tag(&output.result)))
             .collect::<BTreeMap<_, _>>();
         let expected = BTreeMap::from([
-            ("FL001".to_owned(), "pass"),
             ("NX001".to_owned(), "pass"),
             ("NX002".to_owned(), "skip"),
             ("RS001".to_owned(), "pass"),
             ("RS002".to_owned(), "pass"),
-            ("RS003".to_owned(), "pass"),
             ("RS004".to_owned(), "pass"),
             ("RS005".to_owned(), "pass"),
             ("RS006".to_owned(), "pass"),
@@ -2007,12 +1962,10 @@ mod tests {
             .map(|output| (output.id.to_string(), result_tag(&output.result)))
             .collect::<BTreeMap<_, _>>();
         let expected = BTreeMap::from([
-            ("FL001".to_owned(), "fail"),
             ("NX001".to_owned(), "fail"),
             ("NX002".to_owned(), "fail"),
             ("RS001".to_owned(), "fail"),
             ("RS002".to_owned(), "fail"),
-            ("RS003".to_owned(), "fail"),
             ("RS004".to_owned(), "fail"),
             ("RS005".to_owned(), "fail"),
             ("RS006".to_owned(), "fail"),
@@ -2100,9 +2053,12 @@ mod tests {
         let mut facts = base_facts();
         facts.default_branch = BranchName::new("main");
         let mut ruleset = active_branch_ruleset(vec![RulesetRule {
-            kind: RulesetRuleType::PullRequest,
+            kind: RulesetRuleType::RequiredStatusChecks,
             parameters: Some(RulesetRuleParameters {
-                required_approving_review_count: Some(1),
+                required_status_checks: vec![RequiredStatusCheck {
+                    context: "ci".to_owned(),
+                    integration_id: None,
+                }],
                 ..Default::default()
             }),
         }]);
@@ -2119,7 +2075,12 @@ mod tests {
             RuleResult::Fail { .. }
         ));
         assert!(matches!(
-            evaluate(&RuleKind::RulesetRequiresReviewers { min_count: 1 }, &facts,),
+            evaluate(
+                &RuleKind::RulesetRequiresStatusCheck {
+                    check_name: "ci".to_owned(),
+                },
+                &facts,
+            ),
             RuleResult::Fail { .. }
         ));
     }

@@ -26,3 +26,7 @@ Tests use a hand-rolled snapshot system: `tests/fixtures/` contains TOML configs
 The `--snapshot-save` flag captures live API responses for new fixtures.
 
 Property-based tests (proptest) cover serialization roundtrips for configs, facts, workflow models, and GitHub types.
+
+## Consumers
+
+Back-compat is unimportant: this is a personal project with one consumer.
