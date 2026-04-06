@@ -600,6 +600,6 @@ mod tests {
 
         assert!(output.rendered.contains("Fixes:"));
         assert!(output.rendered.contains("PLANNED  ST001"));
-        assert!(output.rendered.contains("PLANNED  ST005"));
+        assert!(output.rendered.contains("PLANNED  ST006"));
     }
 }

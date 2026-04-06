@@ -283,7 +283,7 @@ mod tests {
             }
         );
         assert_eq!(
-            by_rule_id["ST005"].planned_report().status,
+            by_rule_id["ST006"].planned_report().status,
             FixStatus::Planned
         );
     }
