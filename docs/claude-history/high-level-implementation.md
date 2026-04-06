@@ -142,4 +142,3 @@ Implement `report.rs` and wire everything together in `main.rs`:
 - Test: JSON output deserializes into the expected `Vec<RuleOutput>` structure
 - Test: human-readable output contains each rule ID and its pass/fail status
 - Smoke test: `cargo run -- --config example.toml --snapshot-load tests/fixtures/` runs without error and produces non-empty output
-

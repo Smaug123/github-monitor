@@ -14,6 +14,8 @@ use crate::facts::{
     FactsError, RepoFacts, SnapshotError, gather_repo_facts, load_snapshot, save_snapshot,
 };
 use crate::github::client::{GitHubClient, GitHubToken};
+use crate::report::{OutputFormat, OutputFormatError, RepoReport, ReportError};
+use crate::rules::{default_rules, evaluate_rules};
 use crate::types::RepoRef;
 
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
@@ -24,7 +26,7 @@ fn github_token_from_env() -> Option<GitHubToken> {
 
 fn main() -> ExitCode {
     match try_main() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("{error}");
             error.exit_code()
@@ -32,25 +34,34 @@ fn main() -> ExitCode {
     }
 }
 
-fn try_main() -> Result<(), MainError> {
+fn try_main() -> Result<ExitCode, MainError> {
     let args = parse_cli_args(std::env::args().skip(1)).map_err(MainError::Cli)?;
-    let _facts = run(args).map_err(MainError::App)?;
-    Ok(())
+    let output = run(args).map_err(MainError::App)?;
+    print!("{}", output.rendered);
+    Ok(output.exit_code())
 }
 
-fn run(args: CliArgs) -> Result<Vec<RepoFacts>, AppError> {
+fn run(args: CliArgs) -> Result<RunOutput, AppError> {
     let config = Config::from_path(&args.config_path)?;
+    let facts = load_facts(&config, &args.snapshot_mode)?;
+    let reports = evaluate_repo_reports(facts);
+    let rendered = report::render(args.format, &reports)?;
+
+    Ok(RunOutput { reports, rendered })
+}
+
+fn load_facts(config: &Config, snapshot_mode: &SnapshotMode) -> Result<Vec<RepoFacts>, AppError> {
     let repos = config.repo_refs();
 
-    match args.snapshot_mode {
+    match snapshot_mode {
         SnapshotMode::Load(snapshot_dir) => repos
             .iter()
-            .map(|repo| load_snapshot(&snapshot_dir, repo).map_err(AppError::from))
+            .map(|repo| load_snapshot(snapshot_dir, repo).map_err(AppError::from))
             .collect(),
         SnapshotMode::Save(snapshot_dir) => {
             let facts = gather_facts_from_github(&repos)?;
             for repo_facts in &facts {
-                save_snapshot(&snapshot_dir, repo_facts)?;
+                save_snapshot(snapshot_dir, repo_facts)?;
             }
             Ok(facts)
         }
@@ -77,10 +88,23 @@ fn gather_facts_from_github(repos: &[RepoRef]) -> Result<Vec<RepoFacts>, AppErro
     Ok(facts)
 }
 
+fn evaluate_repo_reports(facts: Vec<RepoFacts>) -> Vec<RepoReport> {
+    let rules = default_rules();
+
+    facts
+        .into_iter()
+        .map(|repo_facts| {
+            let outputs = evaluate_rules(&rules, &repo_facts);
+            RepoReport::new(repo_facts.repo, outputs)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     config_path: PathBuf,
     snapshot_mode: SnapshotMode,
+    format: OutputFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +123,7 @@ where
     let mut config_path = None;
     let mut snapshot_save = None;
     let mut snapshot_load = None;
+    let mut format = OutputFormat::Text;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -110,6 +135,10 @@ where
             }
             "--snapshot-load" => {
                 snapshot_load = Some(PathBuf::from(next_arg_value(&mut args, "--snapshot-load")?));
+            }
+            "--format" => {
+                let raw = next_arg_value(&mut args, "--format")?;
+                format = OutputFormat::parse(&raw).map_err(CliError::InvalidFormat)?;
             }
             other => return Err(CliError::UnknownArgument(other.to_owned())),
         }
@@ -127,6 +156,7 @@ where
     Ok(CliArgs {
         config_path,
         snapshot_mode,
+        format,
     })
 }
 
@@ -142,6 +172,7 @@ enum CliError {
     MissingRequiredArgument(&'static str),
     MissingValue(&'static str),
     ConflictingSnapshotModes,
+    InvalidFormat(OutputFormatError),
     UnknownArgument(String),
 }
 
@@ -153,7 +184,20 @@ impl std::fmt::Display for CliError {
             Self::ConflictingSnapshotModes => {
                 f.write_str("only one of --snapshot-save or --snapshot-load may be provided")
             }
+            Self::InvalidFormat(source) => source.fmt(f),
             Self::UnknownArgument(arg) => write!(f, "unknown argument {arg}"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidFormat(source) => Some(source),
+            Self::MissingRequiredArgument(_)
+            | Self::MissingValue(_)
+            | Self::ConflictingSnapshotModes
+            | Self::UnknownArgument(_) => None,
         }
     }
 }
@@ -169,6 +213,7 @@ enum AppError {
         source: Box<FactsError>,
     },
     Snapshot(Box<SnapshotError>),
+    Report(Box<ReportError>),
 }
 
 impl From<ConfigError> for AppError {
@@ -180,6 +225,12 @@ impl From<ConfigError> for AppError {
 impl From<SnapshotError> for AppError {
     fn from(source: SnapshotError) -> Self {
         Self::Snapshot(Box::new(source))
+    }
+}
+
+impl From<ReportError> for AppError {
+    fn from(source: ReportError) -> Self {
+        Self::Report(Box::new(source))
     }
 }
 
@@ -197,6 +248,7 @@ impl std::fmt::Display for AppError {
                 write!(f, "failed to gather facts for {repo}: {source}")
             }
             Self::Snapshot(source) => source.fmt(f),
+            Self::Report(source) => source.fmt(f),
         }
     }
 }
@@ -208,6 +260,7 @@ impl std::error::Error for AppError {
             Self::MissingGitHubToken { .. } => None,
             Self::Facts { source, .. } => Some(source),
             Self::Snapshot(source) => Some(source),
+            Self::Report(source) => Some(source),
         }
     }
 }
@@ -236,9 +289,25 @@ impl std::fmt::Display for MainError {
     }
 }
 
+struct RunOutput {
+    reports: Vec<RepoReport>,
+    rendered: String,
+}
+
+impl RunOutput {
+    fn exit_code(&self) -> ExitCode {
+        if report::has_failures(&self.reports) {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::RuleOutput;
 
     fn fixture_path(path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
@@ -259,20 +328,113 @@ mod tests {
             CliArgs {
                 config_path: PathBuf::from("tests/fixtures/repos.toml"),
                 snapshot_mode: SnapshotMode::Load(PathBuf::from("tests/fixtures")),
+                format: OutputFormat::Text,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_json_output_format() {
+        let args = parse_cli_args([
+            "--config",
+            "tests/fixtures/repos.toml",
+            "--snapshot-load",
+            "tests/fixtures",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args,
+            CliArgs {
+                config_path: PathBuf::from("tests/fixtures/repos.toml"),
+                snapshot_mode: SnapshotMode::Load(PathBuf::from("tests/fixtures")),
+                format: OutputFormat::Json,
             }
         );
     }
 
     #[test]
     fn snapshot_load_reads_committed_fixtures() {
-        let facts = run(CliArgs {
-            config_path: fixture_path("tests/fixtures/repos.toml"),
-            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
-        })
-        .unwrap();
+        let config = Config::from_path(fixture_path("tests/fixtures/repos.toml")).unwrap();
+        let facts =
+            load_facts(&config, &SnapshotMode::Load(fixture_path("tests/fixtures"))).unwrap();
 
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].repo, RepoRef::new("example-org", "good-repo"));
         assert_eq!(facts[1].repo, RepoRef::new("example-org", "bad-repo"));
+    }
+
+    #[test]
+    fn snapshot_run_with_good_repo_only_exits_successfully() {
+        let output = run(CliArgs {
+            config_path: fixture_path("tests/fixtures/good-repo.toml"),
+            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
+            format: OutputFormat::Text,
+        })
+        .unwrap();
+
+        assert_eq!(output.exit_code(), ExitCode::SUCCESS);
+        assert!(
+            output
+                .rendered
+                .contains("Repository: example-org/good-repo")
+        );
+        assert!(output.rendered.contains("PASS    RS001"));
+        assert!(output.rendered.contains("SKIP    NX002"));
+    }
+
+    #[test]
+    fn snapshot_run_with_mixed_repos_returns_failing_exit_code() {
+        let output = run(CliArgs {
+            config_path: fixture_path("tests/fixtures/repos.toml"),
+            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
+            format: OutputFormat::Text,
+        })
+        .unwrap();
+
+        assert_eq!(output.exit_code(), ExitCode::from(1));
+        assert!(output.rendered.contains("Repository: example-org/bad-repo"));
+        assert!(output.rendered.contains("FAIL    WF003"));
+    }
+
+    #[test]
+    fn snapshot_run_renders_json_reports() {
+        let output = run(CliArgs {
+            config_path: fixture_path("tests/fixtures/repos.toml"),
+            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
+            format: OutputFormat::Json,
+        })
+        .unwrap();
+
+        let decoded: Vec<RepoReport> = serde_json::from_str(&output.rendered).unwrap();
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].repo, RepoRef::new("example-org", "good-repo"));
+        assert_eq!(decoded[1].repo, RepoRef::new("example-org", "bad-repo"));
+        assert!(
+            decoded[0]
+                .rules
+                .iter()
+                .any(|rule| rule.id.to_string() == "RS001"
+                    && matches!(rule.result, crate::rules::RuleResult::Pass))
+        );
+    }
+
+    #[test]
+    fn json_report_contains_rule_output_shape() {
+        let output = run(CliArgs {
+            config_path: fixture_path("tests/fixtures/good-repo.toml"),
+            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
+            format: OutputFormat::Json,
+        })
+        .unwrap();
+
+        let decoded: Vec<RepoReport> = serde_json::from_str(&output.rendered).unwrap();
+        let rule_json = serde_json::to_string(&decoded[0].rules).unwrap();
+        let rules: Vec<RuleOutput> = serde_json::from_str(&rule_json).unwrap();
+
+        assert_eq!(rules.len(), decoded[0].rules.len());
     }
 }

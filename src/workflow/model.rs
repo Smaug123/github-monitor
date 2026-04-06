@@ -205,6 +205,7 @@ impl Step {
         }
     }
 
+    #[cfg(test)]
     pub fn with(&self) -> Option<&BTreeMap<String, WithValue>> {
         match &self.kind {
             StepKind::Action(action) => Some(&action.with),
@@ -240,6 +241,7 @@ pub enum ActionReference {
 }
 
 impl ActionReference {
+    #[cfg(test)]
     pub fn as_action_ref(&self) -> Option<&ActionRef> {
         match self {
             Self::Repository(action_ref) => Some(action_ref),

@@ -36,6 +36,7 @@ impl fmt::Display for RepoName {
 pub struct BranchName(String);
 
 impl BranchName {
+    #[cfg(test)]
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }

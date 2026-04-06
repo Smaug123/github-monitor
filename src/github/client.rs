@@ -108,6 +108,7 @@ pub struct GitHubClient {
 pub struct GitHubToken(String);
 
 impl GitHubToken {
+    #[cfg(test)]
     pub fn new(token: impl Into<String>) -> Self {
         Self(token.into())
     }
