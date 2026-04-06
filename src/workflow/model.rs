@@ -113,6 +113,26 @@ pub struct TriggerFilter {
     pub branches: Vec<String>,
     #[serde(
         default,
+        rename = "branches-ignore",
+        deserialize_with = "deserialize_string_or_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub branches_ignore: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string_or_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tags: Vec<String>,
+    #[serde(
+        default,
+        rename = "tags-ignore",
+        deserialize_with = "deserialize_string_or_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tags_ignore: Vec<String>,
+    #[serde(
+        default,
         deserialize_with = "deserialize_string_or_vec",
         skip_serializing_if = "Vec::is_empty"
     )]
@@ -392,8 +412,19 @@ mod tests {
         (
             proptest::collection::vec(path_fragment(), 0..3),
             proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(path_fragment(), 0..3),
         )
-            .prop_map(|(branches, paths)| TriggerFilter { branches, paths })
+            .prop_map(|(branches, branches_ignore, tags, tags_ignore, paths)| {
+                TriggerFilter {
+                    branches,
+                    branches_ignore,
+                    tags,
+                    tags_ignore,
+                    paths,
+                }
+            })
     }
 
     fn triggers_strategy() -> impl Strategy<Value = Triggers> {
@@ -603,6 +634,9 @@ jobs:
             workflow.triggers.push,
             Some(TriggerFilter {
                 branches: vec!["main".to_owned()],
+                branches_ignore: Vec::new(),
+                tags: Vec::new(),
+                tags_ignore: Vec::new(),
                 paths: vec!["app".to_owned()],
             })
         );
@@ -643,6 +677,67 @@ jobs:
     }
 
     #[test]
+    fn parses_branches_ignore_filters() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on:
+  push:
+    branches-ignore:
+      - main
+      - release/**
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            workflow.triggers.push,
+            Some(TriggerFilter {
+                branches: Vec::new(),
+                branches_ignore: vec!["main".to_owned(), "release/**".to_owned()],
+                tags: Vec::new(),
+                tags_ignore: Vec::new(),
+                paths: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_tags_only_push_filters() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on:
+  push:
+    tags:
+      - v*
+    tags-ignore:
+      - v0.*
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            workflow.triggers.push,
+            Some(TriggerFilter {
+                branches: Vec::new(),
+                branches_ignore: Vec::new(),
+                tags: vec!["v*".to_owned()],
+                tags_ignore: vec!["v0.*".to_owned()],
+                paths: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
     fn unknown_fields_are_ignored() {
         let workflow: Workflow = serde_yml::from_str(
             r#"
@@ -673,6 +768,9 @@ jobs:
             workflow.triggers.push,
             Some(TriggerFilter {
                 branches: vec!["main".to_owned()],
+                branches_ignore: Vec::new(),
+                tags: Vec::new(),
+                tags_ignore: Vec::new(),
                 paths: Vec::new(),
             })
         );
