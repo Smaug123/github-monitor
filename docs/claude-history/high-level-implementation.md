@@ -115,7 +115,7 @@ Implement `evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult` for every
 
 **Correctness oracle**:
 - Property: for all `RepoFacts` where `rulesets` is empty, `RulesetExists` evaluates to `Fail`
-- Property: for all `RepoFacts` with at least one ruleset, `RulesetExists` evaluates to `Pass`
+- Property: `RulesetExists` evaluates to `Pass` only when there is at least one active branch ruleset that applies to the default branch
 - Property: for all `RepoFacts` containing a workflow with an action ref that is not a 40-char hex string, `WorkflowActionsPinnedToSha` evaluates to `Fail`
 - Property: for all `RepoFacts` where every action ref is a 40-char hex string, `WorkflowActionsPinnedToSha` evaluates to `Pass`
 - Property: for all `RepoFacts` where `files_present` does not contain a given path, `FileExists { path }` evaluates to `Fail`
@@ -139,7 +139,6 @@ Implement `report.rs` and wire everything together in `main.rs`:
 
 **Correctness oracle**:
 - Test: given a config + `--snapshot-load` pointing at committed fixtures, the process exits with the expected exit code
-- Test: JSON output deserializes into the expected `Vec<RuleOutput>` structure
+- Test: JSON output deserializes into the expected `Vec<RepoReport>` structure (each `RepoReport` contains a `repo` field and a `rules: Vec<RuleOutput>` field)
 - Test: human-readable output contains each rule ID and its pass/fail status
 - Smoke test: `cargo run -- --config example.toml --snapshot-load tests/fixtures/` runs without error and produces non-empty output
-

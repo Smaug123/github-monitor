@@ -84,10 +84,26 @@ pub struct Ruleset {
     pub name: String,
     pub target: RulesetTarget,
     pub enforcement: RulesetEnforcement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<RulesetConditions>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bypass_actors: Vec<BypassActor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<RulesetRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesetConditions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<RefNameCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefNameCondition {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +268,12 @@ mod tests {
   "name": "main protection",
   "target": "branch",
   "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
   "bypass_actors": [
     {
       "actor_id": 5,
@@ -286,6 +308,27 @@ mod tests {
         assert_eq!(ruleset.enforcement, RulesetEnforcement::Active);
         assert_eq!(ruleset.rules.len(), 2);
         assert_eq!(ruleset.rules[0].kind, RulesetRuleType::RequiredStatusChecks);
+        let conditions = ruleset.conditions.unwrap();
+        let ref_name = conditions.ref_name.unwrap();
+        assert_eq!(ref_name.include, vec!["~DEFAULT_BRANCH"]);
+        assert!(ref_name.exclude.is_empty());
+    }
+
+    #[test]
+    fn deserializes_ruleset_without_conditions() {
+        let ruleset: Ruleset = serde_json::from_str(
+            r#"
+{
+  "id": 1,
+  "name": "legacy",
+  "target": "branch",
+  "enforcement": "active"
+}
+"#,
+        )
+        .unwrap();
+
+        assert!(ruleset.conditions.is_none());
     }
 
     #[test]

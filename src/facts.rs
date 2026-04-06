@@ -370,8 +370,9 @@ impl std::error::Error for SnapshotError {
 mod tests {
     use super::*;
     use crate::github::types::{
-        BypassActor, BypassActorType, BypassMode, RequiredStatusCheck, Ruleset, RulesetEnforcement,
-        RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
+        BypassActor, BypassActorType, BypassMode, RefNameCondition, RequiredStatusCheck, Ruleset,
+        RulesetConditions, RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType,
+        RulesetTarget,
     };
     use crate::workflow::model::{
         ActionRef, ActionReference, ActionStep, Job, RunStep, Step, StepKind, TriggerFilter,
@@ -533,21 +534,45 @@ mod tests {
             .prop_map(|(kind, parameters)| RulesetRule { kind, parameters })
     }
 
+    fn ref_name_condition_strategy() -> impl Strategy<Value = RefNameCondition> {
+        (
+            proptest::collection::vec(
+                prop_oneof![
+                    Just("~DEFAULT_BRANCH".to_owned()),
+                    Just("~ALL".to_owned()),
+                    identifier(),
+                ],
+                0..3,
+            ),
+            proptest::collection::vec(identifier(), 0..2),
+        )
+            .prop_map(|(include, exclude)| RefNameCondition { include, exclude })
+    }
+
+    fn ruleset_conditions_strategy() -> impl Strategy<Value = Option<RulesetConditions>> {
+        proptest::option::of(
+            proptest::option::of(ref_name_condition_strategy())
+                .prop_map(|ref_name| RulesetConditions { ref_name }),
+        )
+    }
+
     fn ruleset_strategy() -> impl Strategy<Value = Ruleset> {
         (
             any::<u64>(),
             text(),
             ruleset_target_strategy(),
             ruleset_enforcement_strategy(),
+            ruleset_conditions_strategy(),
             proptest::collection::vec(bypass_actor_strategy(), 0..2),
             proptest::collection::vec(ruleset_rule_strategy(), 0..4),
         )
             .prop_map(
-                |(id, name, target, enforcement, bypass_actors, rules)| Ruleset {
+                |(id, name, target, enforcement, conditions, bypass_actors, rules)| Ruleset {
                     id,
                     name,
                     target,
                     enforcement,
+                    conditions,
                     bypass_actors,
                     rules,
                 },
@@ -735,6 +760,12 @@ mod tests {
                 name: "main protection".to_owned(),
                 target: RulesetTarget::Branch,
                 enforcement: RulesetEnforcement::Active,
+                conditions: Some(RulesetConditions {
+                    ref_name: Some(RefNameCondition {
+                        include: vec!["~DEFAULT_BRANCH".to_owned()],
+                        exclude: Vec::new(),
+                    }),
+                }),
                 bypass_actors: Vec::new(),
                 rules: vec![RulesetRule {
                     kind: RulesetRuleType::RequiredStatusChecks,
