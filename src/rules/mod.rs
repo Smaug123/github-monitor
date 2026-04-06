@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
 use crate::github::types::{
-    BypassActorType, Ruleset, RulesetEnforcement, RulesetRuleType, RulesetTarget,
+    BypassActorType, RefNameCondition, Ruleset, RulesetConditions, RulesetEnforcement,
+    RulesetRuleType, RulesetTarget,
 };
 use crate::types::RuleId;
 use crate::workflow::model::{ActionReference, Step, Workflow};
@@ -252,22 +253,22 @@ pub fn evaluate_rules(rules: &[Rule], facts: &RepoFacts) -> Vec<RuleOutput> {
 pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     match kind {
         RuleKind::RulesetExists => {
-            if facts.rulesets.is_empty() {
-                RuleResult::Fail {
-                    reason: "no rulesets were found".to_owned(),
-                }
-            } else {
+            if has_active_branch_ruleset_for_default_branch(facts) {
                 RuleResult::Pass
+            } else {
+                RuleResult::Fail {
+                    reason: "no active branch ruleset applies to the default branch".to_owned(),
+                }
             }
         }
         RuleKind::RulesetRequiresStatusCheck { check_name } => {
-            if !has_active_branch_ruleset(facts) {
+            if !has_active_branch_ruleset_for_default_branch(facts) {
                 return RuleResult::Fail {
                     reason: "no active branch ruleset was found".to_owned(),
                 };
             }
 
-            if active_branch_rulesets(facts).any(|ruleset| {
+            if active_branch_rulesets_for_default_branch(facts).any(|ruleset| {
                 ruleset.rules.iter().any(|rule| {
                     rule.kind == RulesetRuleType::RequiredStatusChecks
                         && rule.parameters.as_ref().is_some_and(|parameters| {
@@ -288,13 +289,13 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
             }
         }
         RuleKind::RulesetRequiresReviewers { min_count } => {
-            if !has_active_branch_ruleset(facts) {
+            if !has_active_branch_ruleset_for_default_branch(facts) {
                 return RuleResult::Fail {
                     reason: "no active branch ruleset was found".to_owned(),
                 };
             }
 
-            if active_branch_rulesets(facts).any(|ruleset| {
+            if active_branch_rulesets_for_default_branch(facts).any(|ruleset| {
                 ruleset.rules.iter().any(|rule| {
                     rule.kind == RulesetRuleType::PullRequest
                         && rule.parameters.as_ref().is_some_and(|parameters| {
@@ -315,13 +316,13 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
             }
         }
         RuleKind::RulesetEnforcesAdmins => {
-            if !has_active_branch_ruleset(facts) {
+            if !has_active_branch_ruleset_for_default_branch(facts) {
                 return RuleResult::Fail {
                     reason: "no active branch ruleset was found".to_owned(),
                 };
             }
 
-            if let Some(actor_type) = active_branch_rulesets(facts)
+            if let Some(actor_type) = active_branch_rulesets_for_default_branch(facts)
                 .flat_map(|ruleset| ruleset.bypass_actors.iter())
                 .find_map(admin_bypass_actor_name)
             {
@@ -496,20 +497,73 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     }
 }
 
-fn active_branch_rulesets<'a>(facts: &'a RepoFacts) -> impl Iterator<Item = &'a Ruleset> + 'a {
-    facts.rulesets.iter().filter(|ruleset| {
-        ruleset.target == RulesetTarget::Branch && ruleset.enforcement == RulesetEnforcement::Active
+fn active_branch_rulesets_for_default_branch<'a>(
+    facts: &'a RepoFacts,
+) -> impl Iterator<Item = &'a Ruleset> + 'a {
+    let default_branch = facts.default_branch.to_string();
+    facts.rulesets.iter().filter(move |ruleset| {
+        ruleset.target == RulesetTarget::Branch
+            && ruleset.enforcement == RulesetEnforcement::Active
+            && ruleset_conditions_include_branch(&ruleset.conditions, &default_branch)
     })
 }
 
-fn has_active_branch_ruleset(facts: &RepoFacts) -> bool {
-    active_branch_rulesets(facts).next().is_some()
+fn has_active_branch_ruleset_for_default_branch(facts: &RepoFacts) -> bool {
+    active_branch_rulesets_for_default_branch(facts)
+        .next()
+        .is_some()
+}
+
+/// Returns `true` if the ruleset's conditions include the given branch.
+///
+/// When `conditions` is `None` (e.g. from an older snapshot that predates
+/// condition modelling), we conservatively assume the ruleset applies.
+/// When conditions are present, the branch must match at least one include
+/// pattern and must not match any exclude pattern.
+fn ruleset_conditions_include_branch(
+    conditions: &Option<RulesetConditions>,
+    default_branch: &str,
+) -> bool {
+    let Some(conditions) = conditions else {
+        return true;
+    };
+    let Some(ref_name) = &conditions.ref_name else {
+        return true;
+    };
+    ref_name_includes_branch(ref_name, default_branch)
+}
+
+fn ref_name_includes_branch(ref_name: &RefNameCondition, default_branch: &str) -> bool {
+    if ref_name.include.is_empty() {
+        return true;
+    }
+
+    let included = ref_name
+        .include
+        .iter()
+        .any(|pattern| ref_name_pattern_matches(pattern, default_branch));
+
+    if !included {
+        return false;
+    }
+
+    !ref_name
+        .exclude
+        .iter()
+        .any(|pattern| ref_name_pattern_matches(pattern, default_branch))
+}
+
+fn ref_name_pattern_matches(pattern: &str, branch: &str) -> bool {
+    match pattern {
+        "~DEFAULT_BRANCH" => true,
+        "~ALL" => true,
+        _ => branch_pattern_matches(pattern, branch),
+    }
 }
 
 fn admin_bypass_actor_name(actor: &crate::github::types::BypassActor) -> Option<&'static str> {
     match actor.actor_type {
         BypassActorType::OrganizationAdmin => Some("OrganizationAdmin"),
-        BypassActorType::RepositoryRole => Some("RepositoryRole"),
         _ => None,
     }
 }
@@ -519,13 +573,13 @@ fn ruleset_rule_presence_result(
     required_kind: RulesetRuleType,
     required_name: &str,
 ) -> RuleResult {
-    if !has_active_branch_ruleset(facts) {
+    if !has_active_branch_ruleset_for_default_branch(facts) {
         return RuleResult::Fail {
             reason: "no active branch ruleset was found".to_owned(),
         };
     }
 
-    if active_branch_rulesets(facts)
+    if active_branch_rulesets_for_default_branch(facts)
         .any(|ruleset| ruleset.rules.iter().any(|rule| rule.kind == required_kind))
     {
         RuleResult::Pass
@@ -788,8 +842,8 @@ mod tests {
     use super::*;
     use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
     use crate::github::types::{
-        BypassActor, BypassMode, RequiredStatusCheck, Ruleset, RulesetEnforcement, RulesetRule,
-        RulesetRuleParameters, RulesetRuleType, RulesetTarget,
+        BypassActor, BypassMode, RefNameCondition, RequiredStatusCheck, Ruleset, RulesetConditions,
+        RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
     };
     use crate::types::{BranchName, RepoRef};
     use crate::workflow::model::{
@@ -965,21 +1019,45 @@ mod tests {
         ]
     }
 
+    fn ref_name_condition_strategy() -> impl Strategy<Value = RefNameCondition> {
+        (
+            proptest::collection::vec(
+                prop_oneof![
+                    Just("~DEFAULT_BRANCH".to_owned()),
+                    Just("~ALL".to_owned()),
+                    path_fragment(),
+                ],
+                0..3,
+            ),
+            proptest::collection::vec(path_fragment(), 0..2),
+        )
+            .prop_map(|(include, exclude)| RefNameCondition { include, exclude })
+    }
+
+    fn ruleset_conditions_strategy() -> impl Strategy<Value = Option<RulesetConditions>> {
+        proptest::option::of(
+            proptest::option::of(ref_name_condition_strategy())
+                .prop_map(|ref_name| RulesetConditions { ref_name }),
+        )
+    }
+
     fn ruleset_strategy() -> impl Strategy<Value = Ruleset> {
         (
             any::<u64>(),
             path_fragment(),
             ruleset_target_strategy(),
             ruleset_enforcement_strategy(),
+            ruleset_conditions_strategy(),
             proptest::collection::vec(bypass_actor_strategy(), 0..3),
             proptest::collection::vec(ruleset_rule_strategy(), 0..4),
         )
             .prop_map(
-                |(id, name, target, enforcement, bypass_actors, rules)| Ruleset {
+                |(id, name, target, enforcement, conditions, bypass_actors, rules)| Ruleset {
                     id,
                     name,
                     target,
                     enforcement,
+                    conditions,
                     bypass_actors,
                     rules,
                 },
@@ -1250,6 +1328,12 @@ mod tests {
             name: "main protection".to_owned(),
             target: RulesetTarget::Branch,
             enforcement: RulesetEnforcement::Active,
+            conditions: Some(RulesetConditions {
+                ref_name: Some(RefNameCondition {
+                    include: vec!["~DEFAULT_BRANCH".to_owned()],
+                    exclude: Vec::new(),
+                }),
+            }),
             bypass_actors: Vec::new(),
             rules,
         }
@@ -1492,10 +1576,19 @@ mod tests {
         }
 
         #[test]
-        fn ruleset_exists_passes_when_rulesets_are_present(
+        fn ruleset_exists_passes_when_active_branch_ruleset_includes_default_branch(
             mut facts in repo_facts_strategy(),
-            ruleset in ruleset_strategy(),
+            mut ruleset in ruleset_strategy(),
         ) {
+            // Force the ruleset to be an active branch ruleset that applies to the default branch.
+            ruleset.target = RulesetTarget::Branch;
+            ruleset.enforcement = RulesetEnforcement::Active;
+            ruleset.conditions = Some(RulesetConditions {
+                ref_name: Some(RefNameCondition {
+                    include: vec!["~DEFAULT_BRANCH".to_owned()],
+                    exclude: Vec::new(),
+                }),
+            });
             facts.rulesets = vec![ruleset];
             prop_assert_eq!(evaluate(&RuleKind::RulesetExists, &facts), RuleResult::Pass);
         }
@@ -1954,6 +2047,23 @@ mod tests {
     }
 
     #[test]
+    fn ruleset_enforces_admins_passes_when_only_repository_role_bypasses() {
+        let mut facts = base_facts();
+        let mut ruleset = active_branch_ruleset(Vec::new());
+        ruleset.bypass_actors.push(BypassActor {
+            actor_id: Some(5),
+            actor_type: BypassActorType::RepositoryRole,
+            bypass_mode: BypassMode::Always,
+        });
+        facts.rulesets = vec![ruleset];
+
+        assert_eq!(
+            evaluate(&RuleKind::RulesetEnforcesAdmins, &facts),
+            RuleResult::Pass
+        );
+    }
+
+    #[test]
     fn ruleset_requires_status_check_passes_when_check_exists() {
         let mut facts = base_facts();
         facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
@@ -1982,5 +2092,95 @@ mod tests {
             ),
             RuleResult::Pass
         );
+    }
+
+    #[test]
+    fn ruleset_scoped_to_other_branch_does_not_satisfy_default_branch_rules() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("main");
+        let mut ruleset = active_branch_ruleset(vec![RulesetRule {
+            kind: RulesetRuleType::PullRequest,
+            parameters: Some(RulesetRuleParameters {
+                required_approving_review_count: Some(1),
+                ..Default::default()
+            }),
+        }]);
+        ruleset.conditions = Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: vec!["release/*".to_owned()],
+                exclude: Vec::new(),
+            }),
+        });
+        facts.rulesets = vec![ruleset];
+
+        assert!(matches!(
+            evaluate(&RuleKind::RulesetExists, &facts),
+            RuleResult::Fail { .. }
+        ));
+        assert!(matches!(
+            evaluate(&RuleKind::RulesetRequiresReviewers { min_count: 1 }, &facts,),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn ruleset_with_default_branch_token_applies_to_default_branch() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("main");
+        let mut ruleset = active_branch_ruleset(Vec::new());
+        ruleset.conditions = Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: vec!["~DEFAULT_BRANCH".to_owned()],
+                exclude: Vec::new(),
+            }),
+        });
+        facts.rulesets = vec![ruleset];
+
+        assert_eq!(evaluate(&RuleKind::RulesetExists, &facts), RuleResult::Pass);
+    }
+
+    #[test]
+    fn ruleset_with_all_token_applies_to_any_branch() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("develop");
+        let mut ruleset = active_branch_ruleset(Vec::new());
+        ruleset.conditions = Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: vec!["~ALL".to_owned()],
+                exclude: Vec::new(),
+            }),
+        });
+        facts.rulesets = vec![ruleset];
+
+        assert_eq!(evaluate(&RuleKind::RulesetExists, &facts), RuleResult::Pass);
+    }
+
+    #[test]
+    fn ruleset_excluded_default_branch_does_not_apply() {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new("main");
+        let mut ruleset = active_branch_ruleset(Vec::new());
+        ruleset.conditions = Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: vec!["~ALL".to_owned()],
+                exclude: vec!["main".to_owned()],
+            }),
+        });
+        facts.rulesets = vec![ruleset];
+
+        assert!(matches!(
+            evaluate(&RuleKind::RulesetExists, &facts),
+            RuleResult::Fail { .. }
+        ));
+    }
+
+    #[test]
+    fn ruleset_without_conditions_is_treated_as_applying() {
+        let mut facts = base_facts();
+        let mut ruleset = active_branch_ruleset(Vec::new());
+        ruleset.conditions = None;
+        facts.rulesets = vec![ruleset];
+
+        assert_eq!(evaluate(&RuleKind::RulesetExists, &facts), RuleResult::Pass);
     }
 }

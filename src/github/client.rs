@@ -197,8 +197,9 @@ impl GitHubClient {
         repo: &RepoRef,
         sha: &str,
     ) -> Result<GitTree, GitHubClientError> {
+        let encoded_sha = percent_encode_path_segment(sha);
         self.get_json(&format!(
-            "{GITHUB_API_BASE_URL}/repos/{repo}/git/trees/{sha}?recursive=1"
+            "{GITHUB_API_BASE_URL}/repos/{repo}/git/trees/{encoded_sha}?recursive=1"
         ))
     }
 
@@ -658,6 +659,20 @@ mod tests {
         assert_eq!(
             contents_url(&repo, &path),
             "https://api.github.com/repos/owner/repo/contents/dir%20name/file%231%3F.txt"
+        );
+    }
+
+    #[test]
+    fn percent_encodes_slashes_in_branch_names() {
+        assert_eq!(percent_encode_path_segment("release/v1"), "release%2Fv1");
+    }
+
+    #[test]
+    fn percent_encode_leaves_unreserved_characters_intact() {
+        assert_eq!(percent_encode_path_segment("main"), "main");
+        assert_eq!(
+            percent_encode_path_segment("my-branch_2.0~rc1"),
+            "my-branch_2.0~rc1"
         );
     }
 

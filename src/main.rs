@@ -307,7 +307,6 @@ impl RunOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::RuleOutput;
 
     fn fixture_path(path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
@@ -423,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn json_report_contains_rule_output_shape() {
+    fn json_report_top_level_is_vec_repo_report() {
         let output = run(CliArgs {
             config_path: fixture_path("tests/fixtures/good-repo.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
@@ -431,10 +430,26 @@ mod tests {
         })
         .unwrap();
 
-        let decoded: Vec<RepoReport> = serde_json::from_str(&output.rendered).unwrap();
-        let rule_json = serde_json::to_string(&decoded[0].rules).unwrap();
-        let rules: Vec<RuleOutput> = serde_json::from_str(&rule_json).unwrap();
+        // Validate the top-level JSON structure directly: an array of objects
+        // each containing "repo" and "rules" keys.
+        let raw: serde_json::Value = serde_json::from_str(&output.rendered).unwrap();
+        let array = raw.as_array().expect("top-level JSON should be an array");
+        assert!(!array.is_empty());
 
-        assert_eq!(rules.len(), decoded[0].rules.len());
+        for entry in array {
+            let obj = entry.as_object().expect("each entry should be an object");
+            assert!(obj.contains_key("repo"), "entry missing 'repo' key");
+            assert!(obj.contains_key("rules"), "entry missing 'rules' key");
+            let rules = obj["rules"].as_array().expect("'rules' should be an array");
+            for rule in rules {
+                let rule_obj = rule.as_object().expect("each rule should be an object");
+                assert!(rule_obj.contains_key("id"), "rule missing 'id' key");
+                assert!(rule_obj.contains_key("name"), "rule missing 'name' key");
+                assert!(rule_obj.contains_key("result"), "rule missing 'result' key");
+            }
+        }
+
+        // Also confirm it round-trips through the typed schema.
+        let _decoded: Vec<RepoReport> = serde_json::from_str(&output.rendered).unwrap();
     }
 }
