@@ -157,7 +157,7 @@ pub fn default_rules() -> Vec<Rule> {
         ),
         Rule::new(
             "RS004",
-            "Admins cannot bypass rulesets",
+            "Organization admins or repository roles cannot bypass rulesets",
             RuleKind::RulesetEnforcesAdmins,
         ),
         Rule::new(
@@ -324,7 +324,7 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
 
             if let Some(actor_type) = active_branch_rulesets_for_default_branch(facts)
                 .flat_map(|ruleset| ruleset.bypass_actors.iter())
-                .find_map(admin_bypass_actor_name)
+                .find_map(forbidden_bypass_actor_name)
             {
                 RuleResult::Fail {
                     reason: format!("an active branch ruleset allows `{actor_type}` to bypass it"),
@@ -519,7 +519,8 @@ fn has_active_branch_ruleset_for_default_branch(facts: &RepoFacts) -> bool {
 /// When `conditions` is `None` (e.g. from an older snapshot that predates
 /// condition modelling), we conservatively assume the ruleset applies.
 /// When conditions are present, the branch must match at least one include
-/// pattern and must not match any exclude pattern.
+/// pattern and must not match any exclude pattern. An empty include list
+/// therefore matches nothing.
 fn ruleset_conditions_include_branch(
     conditions: &Option<RulesetConditions>,
     default_branch: &str,
@@ -534,11 +535,10 @@ fn ruleset_conditions_include_branch(
 }
 
 fn ref_name_includes_branch(ref_name: &RefNameCondition, default_branch: &str) -> bool {
-    let included = ref_name.include.is_empty()
-        || ref_name
-            .include
-            .iter()
-            .any(|pattern| ref_name_pattern_matches(pattern, default_branch));
+    let included = ref_name
+        .include
+        .iter()
+        .any(|pattern| ref_name_pattern_matches(pattern, default_branch));
 
     if !included {
         return false;
@@ -558,9 +558,13 @@ fn ref_name_pattern_matches(pattern: &str, branch: &str) -> bool {
     }
 }
 
-fn admin_bypass_actor_name(actor: &crate::github::types::BypassActor) -> Option<&'static str> {
+// GitHub exposes bypassable repository roles under `RepositoryRole`, but our
+// facts currently do not resolve the role ID into a narrower built-in or custom
+// role name, so any repository-role bypass is treated as forbidden.
+fn forbidden_bypass_actor_name(actor: &crate::github::types::BypassActor) -> Option<&'static str> {
     match actor.actor_type {
         BypassActorType::OrganizationAdmin => Some("OrganizationAdmin"),
+        BypassActorType::RepositoryRole => Some("RepositoryRole"),
         _ => None,
     }
 }
@@ -2044,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn ruleset_enforces_admins_passes_when_only_repository_role_bypasses() {
+    fn ruleset_enforces_admins_fails_when_repository_role_can_bypass() {
         let mut facts = base_facts();
         let mut ruleset = active_branch_ruleset(Vec::new());
         ruleset.bypass_actors.push(BypassActor {
@@ -2054,10 +2058,10 @@ mod tests {
         });
         facts.rulesets = vec![ruleset];
 
-        assert_eq!(
+        assert!(matches!(
             evaluate(&RuleKind::RulesetEnforcesAdmins, &facts),
-            RuleResult::Pass
-        );
+            RuleResult::Fail { .. }
+        ));
     }
 
     #[test]
@@ -2172,14 +2176,14 @@ mod tests {
     }
 
     #[test]
-    fn ruleset_with_empty_include_still_honors_exclude_patterns() {
+    fn ruleset_with_empty_include_does_not_apply() {
         let mut facts = base_facts();
         facts.default_branch = BranchName::new("main");
         let mut ruleset = active_branch_ruleset(Vec::new());
         ruleset.conditions = Some(RulesetConditions {
             ref_name: Some(RefNameCondition {
                 include: Vec::new(),
-                exclude: vec!["main".to_owned()],
+                exclude: Vec::new(),
             }),
         });
         facts.rulesets = vec![ruleset];
