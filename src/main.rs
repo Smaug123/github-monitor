@@ -1,6 +1,7 @@
 mod config;
 mod facts;
 mod github;
+mod remediation;
 mod report;
 mod rules;
 mod types;
@@ -14,6 +15,7 @@ use crate::facts::{
     FactsError, RepoFacts, SnapshotError, gather_repo_facts, load_snapshot, save_snapshot,
 };
 use crate::github::client::{GitHubClient, GitHubToken};
+use crate::remediation::plan_repo_fixes;
 use crate::report::{OutputFormat, OutputFormatError, RepoReport, ReportError};
 use crate::rules::{default_rules, evaluate_rules};
 use crate::types::RepoRef;
@@ -95,7 +97,8 @@ fn evaluate_repo_reports(facts: Vec<RepoFacts>) -> Vec<RepoReport> {
         .into_iter()
         .map(|repo_facts| {
             let outputs = evaluate_rules(&rules, &repo_facts);
-            RepoReport::new(repo_facts.repo, outputs)
+            let fixes = plan_repo_fixes(&rules, &outputs);
+            RepoReport::new(repo_facts.repo, outputs, fixes)
         })
         .collect()
 }
@@ -440,6 +443,7 @@ mod tests {
             let obj = entry.as_object().expect("each entry should be an object");
             assert!(obj.contains_key("repo"), "entry missing 'repo' key");
             assert!(obj.contains_key("rules"), "entry missing 'rules' key");
+            assert!(obj.contains_key("fixes"), "entry missing 'fixes' key");
             let rules = obj["rules"].as_array().expect("'rules' should be an array");
             for rule in rules {
                 let rule_obj = rule.as_object().expect("each rule should be an object");
@@ -451,5 +455,20 @@ mod tests {
 
         // Also confirm it round-trips through the typed schema.
         let _decoded: Vec<RepoReport> = serde_json::from_str(&output.rendered).unwrap();
+    }
+
+    #[test]
+    fn snapshot_run_lists_planned_fixes_for_fixable_failures() {
+        let output = run(CliArgs {
+            config_path: fixture_path("tests/fixtures/repos.toml"),
+            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
+            format: OutputFormat::Text,
+        })
+        .unwrap();
+
+        assert!(output.rendered.contains("Fixes:"));
+        assert!(output.rendered.contains("PLANNED   ST001"));
+        assert!(output.rendered.contains("PLANNED   ST006"));
+        assert!(output.rendered.contains("REJECTED  RS001"));
     }
 }
