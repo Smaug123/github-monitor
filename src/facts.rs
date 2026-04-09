@@ -753,7 +753,7 @@ mod tests {
                 allow_update_branch: true,
                 allow_squash_merge: true,
                 allow_merge_commit: false,
-                allow_rebase_merge: true,
+                allow_rebase_merge: false,
             },
             rulesets: vec![Ruleset {
                 id: 1,
