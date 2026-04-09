@@ -1,9 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::facts::RepoFacts;
-use crate::rules::{
-    RepoSetting, Rule, RuleKind, RuleOutput, RuleResult, SettingValue, evaluate_rules,
-};
+use crate::rules::{RepoSetting, Rule, RuleKind, RuleOutput, RuleResult, SettingValue};
 use crate::types::RuleId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,12 +19,34 @@ pub enum FixStatus {
     Rejected { reason: String },
 }
 
-pub fn plan_repo_fixes(rules: &[Rule], facts: &RepoFacts) -> Vec<RepoFix> {
-    let outputs = evaluate_rules(rules, facts);
+pub fn plan_repo_fixes(rules: &[Rule], outputs: &[RuleOutput]) -> Vec<RepoFix> {
+    let outputs_by_id = index_rule_outputs(outputs);
 
-    std::iter::zip(rules, &outputs)
-        .filter_map(|(rule, output)| plan_rule_fix(rule, output))
+    rules
+        .iter()
+        .filter_map(|rule| {
+            let output = outputs_by_id
+                .get(&rule.id)
+                .copied()
+                .unwrap_or_else(|| panic!("missing evaluation output for rule {}", rule.id));
+            plan_rule_fix(rule, output)
+        })
         .collect()
+}
+
+fn index_rule_outputs(outputs: &[RuleOutput]) -> HashMap<RuleId, &RuleOutput> {
+    let mut outputs_by_id = HashMap::with_capacity(outputs.len());
+
+    for output in outputs {
+        let replaced = outputs_by_id.insert(output.id.clone(), output);
+        assert!(
+            replaced.is_none(),
+            "duplicate evaluation output for rule {}",
+            output.id
+        );
+    }
+
+    outputs_by_id
 }
 
 fn plan_rule_fix(rule: &Rule, output: &RuleOutput) -> Option<RepoFix> {
@@ -106,7 +127,8 @@ fn setting_value_as_bool(value: &SettingValue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{Rule, default_rules};
+    use crate::facts::RepoFacts;
+    use crate::rules::{Rule, default_rules, evaluate_rules};
     use std::collections::BTreeMap;
 
     fn bad_fixture() -> RepoFacts {
@@ -120,7 +142,9 @@ mod tests {
     #[test]
     fn bad_fixture_plans_effects_and_rejections_for_failed_rules() {
         let facts = bad_fixture();
-        let fixes = plan_repo_fixes(&default_rules(), &facts);
+        let rules = default_rules();
+        let outputs = evaluate_rules(&rules, &facts);
+        let fixes = plan_repo_fixes(&rules, &outputs);
         let by_rule_id = fixes
             .iter()
             .map(|fix| (fix.rule_id.to_string(), fix))
@@ -159,7 +183,8 @@ mod tests {
                 expected: SettingValue::Bool(true),
             },
         )];
-        let fixes = plan_repo_fixes(&rules, &facts);
+        let outputs = evaluate_rules(&rules, &facts);
+        let fixes = plan_repo_fixes(&rules, &outputs);
 
         assert_eq!(
             fixes,
@@ -173,5 +198,18 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn fix_planning_matches_outputs_by_rule_id_not_position() {
+        let facts = bad_fixture();
+        let rules = default_rules();
+        let outputs = evaluate_rules(&rules, &facts);
+        let expected = plan_repo_fixes(&rules, &outputs);
+
+        let mut reversed_outputs = outputs.clone();
+        reversed_outputs.reverse();
+
+        assert_eq!(plan_repo_fixes(&rules, &reversed_outputs), expected);
     }
 }

@@ -97,7 +97,7 @@ fn evaluate_repo_reports(facts: Vec<RepoFacts>) -> Vec<RepoReport> {
         .into_iter()
         .map(|repo_facts| {
             let outputs = evaluate_rules(&rules, &repo_facts);
-            let fixes = plan_repo_fixes(&rules, &repo_facts);
+            let fixes = plan_repo_fixes(&rules, &outputs);
             RepoReport::new(repo_facts.repo, outputs, fixes)
         })
         .collect()
