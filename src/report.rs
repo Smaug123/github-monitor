@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::remediation::{FixStatus, RepoFix};
 use crate::rules::{RuleOutput, RuleResult};
 use crate::types::RepoRef;
 
@@ -42,11 +43,13 @@ impl std::error::Error for OutputFormatError {}
 pub struct RepoReport {
     pub repo: RepoRef,
     pub rules: Vec<RuleOutput>,
+    #[serde(default)]
+    pub fixes: Vec<RepoFix>,
 }
 
 impl RepoReport {
-    pub fn new(repo: RepoRef, rules: Vec<RuleOutput>) -> Self {
-        Self { repo, rules }
+    pub fn new(repo: RepoRef, rules: Vec<RuleOutput>, fixes: Vec<RepoFix>) -> Self {
+        Self { repo, rules, fixes }
     }
 
     pub fn counts(&self) -> RuleCounts {
@@ -130,6 +133,24 @@ fn render_text(reports: &[RepoReport]) -> String {
             }
         }
 
+        if !report.fixes.is_empty() {
+            lines.push("Fixes:".to_owned());
+            lines.push(format!("{:<8}  {:<5}  {}", "STATUS", "RULE", "DESCRIPTION"));
+
+            for fix in &report.fixes {
+                lines.push(format!(
+                    "{:<8}  {:<5}  {}",
+                    fix_status_label(&fix.status),
+                    fix.rule_id,
+                    fix.description
+                ));
+
+                if let Some(reason) = fix_status_reason(&fix.status) {
+                    lines.push(format!("          reason: {reason}"));
+                }
+            }
+        }
+
         let counts = report.counts();
         lines.push(format!(
             "Summary: {} pass, {} fail, {} skip, {} error",
@@ -174,6 +195,20 @@ fn result_reason(result: &RuleResult) -> Option<&str> {
     }
 }
 
+fn fix_status_label(status: &FixStatus) -> &'static str {
+    match status {
+        FixStatus::Planned => "PLANNED",
+        FixStatus::Rejected { .. } => "REJECTED",
+    }
+}
+
+fn fix_status_reason(status: &FixStatus) -> Option<&str> {
+    match status {
+        FixStatus::Planned => None,
+        FixStatus::Rejected { reason } => Some(reason),
+    }
+}
+
 #[derive(Debug)]
 pub enum ReportError {
     JsonSerialize { source: serde_json::Error },
@@ -200,6 +235,7 @@ impl std::error::Error for ReportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remediation::{FixStatus, RepoFix};
     use crate::rules::{RuleOutput, RuleResult};
     use crate::types::{RepoRef, RuleId};
 
@@ -221,6 +257,23 @@ mod tests {
                         },
                     },
                 ],
+                vec![
+                    RepoFix {
+                        rule_id: RuleId::new("ST001"),
+                        rule_name: "Auto-merge is enabled".to_owned(),
+                        description: "set repository setting `allow_auto_merge` to true".to_owned(),
+                        status: FixStatus::Planned,
+                    },
+                    RepoFix {
+                        rule_id: RuleId::new("RS001"),
+                        rule_name: "Rulesets exist".to_owned(),
+                        description: "automatic fix unavailable".to_owned(),
+                        status: FixStatus::Rejected {
+                            reason: "automatic fixes for this rule are not implemented yet"
+                                .to_owned(),
+                        },
+                    },
+                ],
             ),
             RepoReport::new(
                 RepoRef::new("example-org", "bad-repo"),
@@ -230,6 +283,13 @@ mod tests {
                     result: RuleResult::Fail {
                         reason: "unsafe.yml uses actions/checkout".to_owned(),
                     },
+                }],
+                vec![RepoFix {
+                    rule_id: RuleId::new("ST002"),
+                    rule_name: "Delete branch on merge is enabled".to_owned(),
+                    description: "set repository setting `delete_branch_on_merge` to true"
+                        .to_owned(),
+                    status: FixStatus::Planned,
                 }],
             ),
         ]
@@ -262,8 +322,19 @@ mod tests {
         assert!(rendered.contains("PASS    RS001  Rulesets exist"));
         assert!(rendered.contains("SKIP    NX002  The flake has observable check coverage"));
         assert!(rendered.contains("reason: flake outputs are not yet captured"));
+        assert!(rendered.contains("Fixes:"));
+        assert!(
+            rendered.contains("PLANNED   ST001  set repository setting `allow_auto_merge` to true")
+        );
+        assert!(rendered.contains("REJECTED  RS001  automatic fix unavailable"));
+        assert!(rendered.contains("reason: automatic fixes for this rule are not implemented yet"));
         assert!(
             rendered.contains("FAIL    WF003  No pull_request_target workflow checks out code")
+        );
+        assert!(
+            rendered.contains(
+                "PLANNED   ST002  set repository setting `delete_branch_on_merge` to true"
+            )
         );
         assert!(rendered.contains("Overall: 1 pass, 1 fail, 1 skip, 0 error"));
     }
@@ -279,6 +350,7 @@ mod tests {
                     reason: "flake outputs are not yet captured".to_owned(),
                 },
             }],
+            Vec::new(),
         )];
 
         assert!(!has_failures(&reports));
