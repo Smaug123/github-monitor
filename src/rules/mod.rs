@@ -222,9 +222,17 @@ pub fn default_rules() -> Vec<Rule> {
         ),
         Rule::new(
             "ST005",
-            "Rebase merges are enabled",
+            "Rebase merges are disabled",
             RuleKind::RepoSettingMatch {
                 setting: RepoSetting::AllowRebaseMerge,
+                expected: SettingValue::Bool(false),
+            },
+        ),
+        Rule::new(
+            "ST006",
+            "Squash merges are enabled",
+            RuleKind::RepoSettingMatch {
+                setting: RepoSetting::AllowSquashMerge,
                 expected: SettingValue::Bool(true),
             },
         ),
@@ -1945,6 +1953,7 @@ mod tests {
             ("ST003".to_owned(), "pass"),
             ("ST004".to_owned(), "pass"),
             ("ST005".to_owned(), "pass"),
+            ("ST006".to_owned(), "pass"),
             ("WF001".to_owned(), "pass"),
             ("WF002".to_owned(), "pass"),
             ("WF003".to_owned(), "pass"),
@@ -1974,7 +1983,8 @@ mod tests {
             ("ST002".to_owned(), "fail"),
             ("ST003".to_owned(), "fail"),
             ("ST004".to_owned(), "fail"),
-            ("ST005".to_owned(), "fail"),
+            ("ST005".to_owned(), "pass"),
+            ("ST006".to_owned(), "fail"),
             ("WF001".to_owned(), "fail"),
             ("WF002".to_owned(), "fail"),
             ("WF003".to_owned(), "fail"),
