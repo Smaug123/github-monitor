@@ -101,6 +101,13 @@ pub fn has_failures(reports: &[RepoReport]) -> bool {
     overall_counts(reports).has_failures()
 }
 
+pub fn has_failed_fixes(reports: &[RepoReport]) -> bool {
+    reports
+        .iter()
+        .flat_map(|report| &report.fixes)
+        .any(|fix| matches!(fix.status, FixStatus::Failed { .. }))
+}
+
 fn rule_counts(rules: &[RuleOutput]) -> RuleCounts {
     let mut counts = RuleCounts::default();
     for rule in rules {
@@ -135,18 +142,18 @@ fn render_text(reports: &[RepoReport]) -> String {
 
         if !report.fixes.is_empty() {
             lines.push("Fixes:".to_owned());
-            lines.push(format!("{:<8}  {:<5}  {}", "STATUS", "RULE", "DESCRIPTION"));
+            lines.push(format!("{:<7}  {:<5}  {}", "STATUS", "RULE", "DESCRIPTION"));
 
             for fix in &report.fixes {
                 lines.push(format!(
-                    "{:<8}  {:<5}  {}",
+                    "{:<7}  {:<5}  {}",
                     fix_status_label(&fix.status),
                     fix.rule_id,
                     fix.description
                 ));
 
                 if let Some(reason) = fix_status_reason(&fix.status) {
-                    lines.push(format!("          reason: {reason}"));
+                    lines.push(format!("         reason: {reason}"));
                 }
             }
         }
@@ -199,13 +206,15 @@ fn fix_status_label(status: &FixStatus) -> &'static str {
     match status {
         FixStatus::Planned => "PLANNED",
         FixStatus::Rejected { .. } => "REJECTED",
+        FixStatus::Applied => "APPLIED",
+        FixStatus::Failed { .. } => "FAILED",
     }
 }
 
 fn fix_status_reason(status: &FixStatus) -> Option<&str> {
     match status {
-        FixStatus::Planned => None,
-        FixStatus::Rejected { reason } => Some(reason),
+        FixStatus::Planned | FixStatus::Applied => None,
+        FixStatus::Rejected { reason } | FixStatus::Failed { reason } => Some(reason),
     }
 }
 
@@ -289,7 +298,9 @@ mod tests {
                     rule_name: "Delete branch on merge is enabled".to_owned(),
                     description: "set repository setting `delete_branch_on_merge` to true"
                         .to_owned(),
-                    status: FixStatus::Planned,
+                    status: FixStatus::Failed {
+                        reason: "request failed".to_owned(),
+                    },
                 }],
             ),
         ]
@@ -324,7 +335,7 @@ mod tests {
         assert!(rendered.contains("reason: flake outputs are not yet captured"));
         assert!(rendered.contains("Fixes:"));
         assert!(
-            rendered.contains("PLANNED   ST001  set repository setting `allow_auto_merge` to true")
+            rendered.contains("PLANNED  ST001  set repository setting `allow_auto_merge` to true")
         );
         assert!(rendered.contains("REJECTED  RS001  automatic fix unavailable"));
         assert!(rendered.contains("reason: automatic fixes for this rule are not implemented yet"));
@@ -333,9 +344,10 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "PLANNED   ST002  set repository setting `delete_branch_on_merge` to true"
+                "FAILED   ST002  set repository setting `delete_branch_on_merge` to true"
             )
         );
+        assert!(rendered.contains("reason: request failed"));
         assert!(rendered.contains("Overall: 1 pass, 1 fail, 1 skip, 0 error"));
     }
 
@@ -354,5 +366,10 @@ mod tests {
         )];
 
         assert!(!has_failures(&reports));
+    }
+
+    #[test]
+    fn failed_fix_counts_as_failed_fix() {
+        assert!(has_failed_fixes(&sample_reports()));
     }
 }

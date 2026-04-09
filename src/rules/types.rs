@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::facts::{RepoFacts, RepoSettings};
 use crate::types::RuleId;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepoSetting {
     Private,
     Archived,
@@ -17,7 +17,7 @@ pub enum RepoSetting {
 }
 
 impl RepoSetting {
-    pub(super) fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Private => "private",
             Self::Archived => "archived",
@@ -29,6 +29,18 @@ impl RepoSetting {
             Self::AllowMergeCommit => "allow_merge_commit",
             Self::AllowRebaseMerge => "allow_rebase_merge",
         }
+    }
+
+    pub(crate) fn is_safe_to_auto_fix(&self) -> bool {
+        matches!(
+            self,
+            Self::AllowAutoMerge
+                | Self::DeleteBranchOnMerge
+                | Self::AllowUpdateBranch
+                | Self::AllowSquashMerge
+                | Self::AllowMergeCommit
+                | Self::AllowRebaseMerge
+        )
     }
 
     pub(super) fn read(&self, settings: &RepoSettings) -> SettingValue {
@@ -54,9 +66,15 @@ pub enum SettingValue {
 }
 
 impl SettingValue {
-    pub(super) fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             Self::Bool(value) => value.to_string(),
+        }
+    }
+
+    pub(crate) fn as_bool(&self) -> bool {
+        match self {
+            Self::Bool(value) => *value,
         }
     }
 }
