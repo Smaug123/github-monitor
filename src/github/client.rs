@@ -2,6 +2,7 @@ use std::fmt;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use ureq::http::Response;
 use ureq::http::header::HeaderMap;
@@ -9,7 +10,7 @@ use ureq::{Agent, Body, Error as UreqError};
 
 use crate::github::types::{
     GitTree, Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
-    Ruleset,
+    RepositoryUpdate, Ruleset,
 };
 use crate::types::RepoRef;
 
@@ -102,6 +103,7 @@ pub struct GitHubClient {
     token: GitHubToken,
     rate_limit: RateLimitState,
     agent: Agent,
+    api_base_url: String,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -141,15 +143,24 @@ impl GitHubClient {
             token,
             rate_limit: RateLimitState::default(),
             agent,
+            api_base_url: GITHUB_API_BASE_URL.to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_base_url(token: GitHubToken, base_url: impl Into<String>) -> Self {
+        Self {
+            api_base_url: base_url.into(),
+            ..Self::new(token)
         }
     }
 
     pub fn get_repo(&mut self, repo: &RepoRef) -> Result<Repository, GitHubClientError> {
-        self.get_json(&format!("{GITHUB_API_BASE_URL}/repos/{repo}"))
+        self.get_json(&format!("{}/repos/{repo}", self.api_base_url))
     }
 
     pub fn list_rulesets(&mut self, repo: &RepoRef) -> Result<Vec<Ruleset>, GitHubClientError> {
-        self.get_paginated_json(&format!("{GITHUB_API_BASE_URL}/repos/{repo}/rulesets"))
+        self.get_paginated_json(&format!("{}/repos/{repo}/rulesets", self.api_base_url))
     }
 
     pub fn get_ruleset(
@@ -158,8 +169,17 @@ impl GitHubClient {
         ruleset_id: u64,
     ) -> Result<Ruleset, GitHubClientError> {
         self.get_json(&format!(
-            "{GITHUB_API_BASE_URL}/repos/{repo}/rulesets/{ruleset_id}"
+            "{}/repos/{repo}/rulesets/{ruleset_id}",
+            self.api_base_url
         ))
+    }
+
+    pub fn update_repository(
+        &mut self,
+        repo: &RepoRef,
+        update: &RepositoryUpdate,
+    ) -> Result<Repository, GitHubClientError> {
+        self.patch_json(&format!("{}/repos/{repo}", self.api_base_url), update)
     }
 
     pub fn get_file_contents(
@@ -167,7 +187,7 @@ impl GitHubClient {
         repo: &RepoRef,
         path: &NonRootRepoPath,
     ) -> Result<RepositoryFileContent, GitHubClientError> {
-        let url = contents_url(repo, path.as_repo_path());
+        let url = contents_url(&self.api_base_url, repo, path.as_repo_path());
         match self.get_json::<RepositoryContents>(&url)? {
             RepositoryContents::File(file) => Ok(file),
             RepositoryContents::Directory(_) => Err(GitHubClientError::UnexpectedContentsShape {
@@ -182,7 +202,7 @@ impl GitHubClient {
         repo: &RepoRef,
         path: &RepoPath,
     ) -> Result<Vec<RepositoryDirectoryEntry>, GitHubClientError> {
-        let url = contents_url(repo, path);
+        let url = contents_url(&self.api_base_url, repo, path);
         match self.get_json::<RepositoryContents>(&url)? {
             RepositoryContents::Directory(entries) => Ok(entries),
             RepositoryContents::File(_) => Err(GitHubClientError::UnexpectedContentsShape {
@@ -199,7 +219,8 @@ impl GitHubClient {
     ) -> Result<GitTree, GitHubClientError> {
         let encoded_sha = percent_encode_path_segment(sha);
         self.get_json(&format!(
-            "{GITHUB_API_BASE_URL}/repos/{repo}/git/trees/{encoded_sha}?recursive=1"
+            "{}/repos/{repo}/git/trees/{encoded_sha}?recursive=1",
+            self.api_base_url
         ))
     }
 
@@ -244,6 +265,21 @@ impl GitHubClient {
         }
 
         Ok(values)
+    }
+
+    fn patch_json<T, B>(&mut self, url: &str, body: &B) -> Result<T, GitHubClientError>
+    where
+        T: DeserializeOwned,
+        B: Serialize,
+    {
+        let mut response = self.send_patch(url, body)?;
+        response
+            .body_mut()
+            .read_json()
+            .map_err(|source| GitHubClientError::Request {
+                url: url.to_owned(),
+                source,
+            })
     }
 
     fn send_get(&mut self, url: &str) -> Result<Response<Body>, GitHubClientError> {
@@ -293,6 +329,56 @@ impl GitHubClient {
         }
     }
 
+    fn send_patch<B>(&mut self, url: &str, body: &B) -> Result<Response<Body>, GitHubClientError>
+    where
+        B: Serialize,
+    {
+        let mut retries = 0;
+
+        loop {
+            self.sleep_for_rate_limit_if_needed();
+
+            match self.call_patch_once(url, body) {
+                Ok(mut response) => {
+                    self.update_rate_limit(response.headers());
+
+                    if !response.status().is_success() {
+                        if let Some(delay) =
+                            retry_delay(retries, RetryTrigger::Status(response.status().as_u16()))
+                        {
+                            retries += 1;
+                            thread::sleep(delay);
+                            continue;
+                        }
+
+                        let body = response.body_mut().read_to_string().unwrap_or_default();
+                        return Err(GitHubClientError::UnexpectedStatus {
+                            url: url.to_owned(),
+                            status: response.status().as_u16(),
+                            body,
+                        });
+                    }
+
+                    return Ok(response);
+                }
+                Err(source) => {
+                    if is_retryable_transport_error(&source)
+                        && let Some(delay) = retry_delay(retries, RetryTrigger::Network)
+                    {
+                        retries += 1;
+                        thread::sleep(delay);
+                        continue;
+                    }
+
+                    return Err(GitHubClientError::Request {
+                        url: url.to_owned(),
+                        source,
+                    });
+                }
+            }
+        }
+    }
+
     fn call_once(&self, url: &str) -> Result<Response<Body>, UreqError> {
         self.agent
             .get(url)
@@ -301,6 +387,19 @@ impl GitHubClient {
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .header("User-Agent", USER_AGENT)
             .call()
+    }
+
+    fn call_patch_once<B>(&self, url: &str, body: &B) -> Result<Response<Body>, UreqError>
+    where
+        B: Serialize,
+    {
+        self.agent
+            .patch(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", self.token.as_bearer_header())
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .header("User-Agent", USER_AGENT)
+            .send_json(body)
     }
 
     fn sleep_for_rate_limit_if_needed(&self) {
@@ -501,8 +600,8 @@ fn unix_time_now() -> u64 {
         .as_secs()
 }
 
-fn contents_url(repo: &RepoRef, path: &RepoPath) -> String {
-    let base = format!("{GITHUB_API_BASE_URL}/repos/{repo}/contents");
+fn contents_url(base_url: &str, repo: &RepoRef, path: &RepoPath) -> String {
+    let base = format!("{base_url}/repos/{repo}/contents");
     if path.is_root() {
         base
     } else {
@@ -657,7 +756,7 @@ mod tests {
         let path = RepoPath::new("dir name/file#1?.txt").unwrap();
 
         assert_eq!(
-            contents_url(&repo, &path),
+            contents_url(GITHUB_API_BASE_URL, &repo, &path),
             "https://api.github.com/repos/owner/repo/contents/dir%20name/file%231%3F.txt"
         );
     }
