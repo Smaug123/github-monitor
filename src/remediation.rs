@@ -93,6 +93,7 @@ struct PreparedWorkflowUpdate {
 struct WorkflowPinChange {
     from: String,
     to: String,
+    tag_comment: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -189,14 +190,19 @@ impl RepositoryActionUse {
     }
 
     fn rendered_with_version(&self, version: &str) -> String {
-        let comment = if version != self.version {
-            format!(" # {}", self.version)
-        } else {
-            String::new()
-        };
         match &self.subpath {
-            Some(subpath) => format!("{}/{subpath}@{version}{comment}", self.repo),
-            None => format!("{}@{version}{comment}", self.repo),
+            Some(subpath) => format!("{}/{subpath}@{version}", self.repo),
+            None => format!("{}@{version}", self.repo),
+        }
+    }
+
+    /// Returns the original version string to use as a YAML comment when pinning
+    /// changes the version (e.g. from a tag to a SHA), or `None` if unchanged.
+    fn tag_comment(&self, pinned_version: &str) -> Option<&str> {
+        if pinned_version != self.version {
+            Some(&self.version)
+        } else {
+            None
         }
     }
 }
@@ -478,7 +484,9 @@ fn prepare_workflow_updates(
 
             let from = pin.action.to_string();
             let to = pin.action.rendered_with_version(&resolved_sha);
-            let (updated_content, replacements) = replace_uses_line_value(&content, &from, &to)?;
+            let tag_comment = pin.action.tag_comment(&resolved_sha);
+            let (updated_content, replacements) =
+                replace_uses_line_value(&content, &from, &to, tag_comment)?;
 
             if replacements != pin.occurrences {
                 return Err(format!(
@@ -488,7 +496,11 @@ fn prepare_workflow_updates(
             }
 
             content = updated_content;
-            changes.push(WorkflowPinChange { from, to });
+            changes.push(WorkflowPinChange {
+                from,
+                to,
+                tag_comment: tag_comment.map(str::to_owned),
+            });
         }
 
         if content == original {
@@ -522,9 +534,13 @@ fn workflow_pin_pull_request_body(updates: &[PreparedWorkflowUpdate]) -> String 
 
     for update in updates {
         for change in &update.changes {
+            let display_to = match &change.tag_comment {
+                Some(tag) => format!("{} # {tag}", change.to),
+                None => change.to.clone(),
+            };
             lines.push(format!(
                 "- `{}`: `{}` -> `{}`",
-                update.path, change.from, change.to
+                update.path, change.from, display_to
             ));
         }
     }
@@ -709,9 +725,14 @@ fn is_commit_sha(version: &str) -> bool {
     version.len() == 40 && version.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn replace_uses_line_value(text: &str, from: &str, to: &str) -> Result<(String, usize), String> {
+fn replace_uses_line_value(
+    text: &str,
+    from: &str,
+    to: &str,
+    tag_comment: Option<&str>,
+) -> Result<(String, usize), String> {
     let pattern = Regex::new(&format!(
-        r#"(?m)^([ \t-]*uses:[ \t]*['"]?){}(['"]?[ \t]*(?:#[^\r\n]*)?\r?)$"#,
+        r#"(?m)^([ \t-]*uses:[ \t]*['"]?){}(['"]?)([ \t]*(?:#[^\r\n]*)?)(\r?)$"#,
         regex::escape(from)
     ))
     .map_err(|error| format!("invalid workflow replacement pattern for `{from}`: {error}"))?;
@@ -719,7 +740,16 @@ fn replace_uses_line_value(text: &str, from: &str, to: &str) -> Result<(String, 
     let replacements = pattern.captures_iter(text).count();
     let updated = pattern
         .replace_all(text, |captures: &regex::Captures<'_>| {
-            format!("{}{}{}", &captures[1], to, &captures[2])
+            let prefix = &captures[1];
+            let close_quote = &captures[2];
+            let existing_comment = &captures[3];
+            let cr = &captures[4];
+
+            let comment = match (tag_comment, existing_comment.contains('#')) {
+                (Some(tag), false) => format!(" # {tag}"),
+                _ => existing_comment.to_owned(),
+            };
+            format!("{prefix}{to}{close_quote}{comment}{cr}")
         })
         .into_owned();
 
@@ -990,12 +1020,13 @@ mod tests {
     }
 
     #[test]
-    fn replace_uses_line_value_preserves_quotes_and_comments() {
+    fn replace_uses_line_value_preserves_quotes_and_existing_comments() {
         let source = "      - uses: \"actions/checkout@v4\" # keep me\n";
         let (updated, replacements) = replace_uses_line_value(
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+            None,
         )
         .unwrap();
 
@@ -1013,6 +1044,7 @@ mod tests {
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+            None,
         )
         .unwrap();
 
@@ -1020,6 +1052,78 @@ mod tests {
         assert_eq!(
             updated,
             "      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\r\n"
+        );
+    }
+
+    #[test]
+    fn replace_uses_line_value_places_tag_comment_outside_quotes() {
+        let source = "      - uses: \"actions/checkout@v4\"\n";
+        let (updated, replacements) = replace_uses_line_value(
+            source,
+            "actions/checkout@v4",
+            "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+            Some("v4"),
+        )
+        .unwrap();
+
+        assert_eq!(replacements, 1);
+        assert_eq!(
+            updated,
+            "      - uses: \"actions/checkout@0123456789abcdef0123456789abcdef01234567\" # v4\n"
+        );
+    }
+
+    #[test]
+    fn replace_uses_line_value_tag_comment_unquoted() {
+        let source = "      - uses: actions/checkout@v4\n";
+        let (updated, replacements) = replace_uses_line_value(
+            source,
+            "actions/checkout@v4",
+            "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+            Some("v4"),
+        )
+        .unwrap();
+
+        assert_eq!(replacements, 1);
+        assert_eq!(
+            updated,
+            "      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v4\n"
+        );
+    }
+
+    #[test]
+    fn replace_uses_line_value_preserves_existing_comment_over_tag() {
+        let source = "      - uses: \"actions/checkout@v4\" # pinned for security\n";
+        let (updated, replacements) = replace_uses_line_value(
+            source,
+            "actions/checkout@v4",
+            "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+            Some("v4"),
+        )
+        .unwrap();
+
+        assert_eq!(replacements, 1);
+        assert_eq!(
+            updated,
+            "      - uses: \"actions/checkout@0123456789abcdef0123456789abcdef01234567\" # pinned for security\n"
+        );
+    }
+
+    #[test]
+    fn replace_uses_line_value_tag_comment_with_crlf() {
+        let source = "      - uses: \"actions/checkout@v4\"\r\n";
+        let (updated, replacements) = replace_uses_line_value(
+            source,
+            "actions/checkout@v4",
+            "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+            Some("v4"),
+        )
+        .unwrap();
+
+        assert_eq!(replacements, 1);
+        assert_eq!(
+            updated,
+            "      - uses: \"actions/checkout@0123456789abcdef0123456789abcdef01234567\" # v4\r\n"
         );
     }
 
@@ -1124,6 +1228,103 @@ mod tests {
                     )));
                 },
                 r#"{"number":42,"html_url":"https://example.test/pr/42"}"#.to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_pins_quoted_uses_with_comment_outside_quotes() {
+        let facts = bad_fixture();
+        let rules = vec![Rule::new(
+            "WF002",
+            "Workflow actions are pinned to commit SHAs",
+            RuleKind::WorkflowActionsPinnedToSha,
+        )];
+        let fixes = plan_repo_fixes(&rules, &facts);
+        let resolved_sha = "0123456789abcdef0123456789abcdef01234567";
+        let default_branch_sha = "fedcba9876543210fedcba9876543210fedcba98";
+        let workflow_yaml = concat!(
+            "name: Unsafe CI\n",
+            "on:\n",
+            "  pull_request_target:\n",
+            "jobs:\n",
+            "  build:\n",
+            "    runs-on: ubuntu-latest\n",
+            "    steps:\n",
+            "      - uses: \"actions/checkout@v4\"\n",
+            "      - run: echo unsafe\n",
+        );
+        let workflow_content = base64::engine::general_purpose::STANDARD.encode(workflow_yaml);
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/bad-repo/commits/main",
+                |_| {},
+                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
+            ),
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/bad-repo/contents/.github/workflows/unsafe.yml?ref=fedcba9876543210fedcba9876543210fedcba98",
+                |_| {},
+                format!(
+                    r#"{{"name":"unsafe.yml","path":".github/workflows/unsafe.yml","sha":"blobsha","type":"file","encoding":"base64","content":"{workflow_content}"}}"#
+                ),
+            ),
+            ExpectedRequest::json(
+                "GET",
+                "/repos/actions/checkout/commits/v4",
+                |_| {},
+                format!(r#"{{"sha":"{resolved_sha}"}}"#),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/bad-repo/git/refs",
+                move |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(json["sha"], default_branch_sha);
+                },
+                r#"{"ref":"refs/heads/topic","object":{"sha":"abc123","type":"commit"}}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/bad-repo/contents/.github/workflows/unsafe.yml",
+                move |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let content = json["content"].as_str().unwrap();
+                    let decoded = String::from_utf8(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(content)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    // The tag comment must be OUTSIDE the quotes
+                    assert!(
+                        decoded.contains(&format!("\"actions/checkout@{resolved_sha}\" # v4")),
+                        "expected tag comment outside quotes, got:\n{decoded}"
+                    );
+                    // Must NOT have the comment inside quotes
+                    assert!(
+                        !decoded.contains(&format!("\"actions/checkout@{resolved_sha} # v4\"")),
+                        "tag comment must not be inside quotes, got:\n{decoded}"
+                    );
+                },
+                "{}".to_owned(),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/bad-repo/pulls",
+                |_| {},
+                r#"{"number":43,"html_url":"https://example.test/pr/43"}"#.to_owned(),
             ),
         ]);
         let mut client = GitHubClient::with_base_url(
