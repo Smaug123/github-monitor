@@ -355,7 +355,6 @@ fn create_workflow_pin_pull_request(
     client: &mut GitHubClient,
     plan: &WorkflowPinPullRequestPlan,
 ) -> Result<PullRequest, String> {
-    let prepared_updates = prepare_workflow_updates(client, plan)?;
     let branch_name = workflow_pin_branch_name();
     let base_sha = client
         .resolve_commit_sha(&plan.repo, &plan.default_branch.to_string())
@@ -365,6 +364,7 @@ fn create_workflow_pin_pull_request(
                 plan.default_branch, plan.repo
             )
         })?;
+    let prepared_updates = prepare_workflow_updates(client, plan, &base_sha)?;
 
     client
         .create_git_reference(
@@ -430,6 +430,7 @@ fn create_workflow_pin_pull_request(
 fn prepare_workflow_updates(
     client: &mut GitHubClient,
     plan: &WorkflowPinPullRequestPlan,
+    reference: &str,
 ) -> Result<Vec<PreparedWorkflowUpdate>, String> {
     let mut resolved_shas = std::collections::HashMap::<String, String>::new();
     let mut prepared = Vec::with_capacity(plan.workflows.len());
@@ -442,10 +443,10 @@ fn prepare_workflow_updates(
             )
         })?;
         let file = client
-            .get_file_contents(&plan.repo, &path)
+            .get_file_contents_at_ref(&plan.repo, &path, reference)
             .map_err(|error| {
                 format!(
-                    "failed to fetch workflow `{}` from `{}`: {error}",
+                    "failed to fetch workflow `{}` from `{}` at `{reference}`: {error}",
                     workflow.path, plan.repo
                 )
             })?;
@@ -705,7 +706,7 @@ fn is_commit_sha(version: &str) -> bool {
 
 fn replace_uses_line_value(text: &str, from: &str, to: &str) -> Result<(String, usize), String> {
     let pattern = Regex::new(&format!(
-        r#"(?m)^([ \t-]*uses:[ \t]*['"]?){}(['"]?[ \t]*(?:#.*)?)$"#,
+        r#"(?m)^([ \t-]*uses:[ \t]*['"]?){}(['"]?[ \t]*(?:#[^\r\n]*)?\r?)$"#,
         regex::escape(from)
     ))
     .map_err(|error| format!("invalid workflow replacement pattern for `{from}`: {error}"))?;
@@ -1001,6 +1002,23 @@ mod tests {
     }
 
     #[test]
+    fn replace_uses_line_value_preserves_crlf_line_endings() {
+        let source = "      - uses: actions/checkout@v4\r\n";
+        let (updated, replacements) = replace_uses_line_value(
+            source,
+            "actions/checkout@v4",
+            "actions/checkout@0123456789abcdef0123456789abcdef01234567",
+        )
+        .unwrap();
+
+        assert_eq!(replacements, 1);
+        assert_eq!(
+            updated,
+            "      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\r\n"
+        );
+    }
+
+    #[test]
     fn execute_repo_fixes_opens_pull_request_for_workflow_pins() {
         let facts = bad_fixture();
         let rules = vec![Rule::new(
@@ -1026,7 +1044,13 @@ mod tests {
         let server = TestServer::spawn(vec![
             ExpectedRequest::json(
                 "GET",
-                "/repos/example-org/bad-repo/contents/.github/workflows/unsafe.yml",
+                "/repos/example-org/bad-repo/commits/main",
+                |_| {},
+                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
+            ),
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/bad-repo/contents/.github/workflows/unsafe.yml?ref=fedcba9876543210fedcba9876543210fedcba98",
                 |_| {},
                 format!(
                     r#"{{"name":"unsafe.yml","path":".github/workflows/unsafe.yml","sha":"blobsha","type":"file","encoding":"base64","content":"{workflow_content}"}}"#
@@ -1037,12 +1061,6 @@ mod tests {
                 "/repos/actions/checkout/commits/v4",
                 |_| {},
                 format!(r#"{{"sha":"{resolved_sha}"}}"#),
-            ),
-            ExpectedRequest::json(
-                "GET",
-                "/repos/example-org/bad-repo/commits/main",
-                |_| {},
-                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
             ),
             ExpectedRequest::json(
                 "POST",

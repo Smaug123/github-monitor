@@ -212,7 +212,25 @@ impl GitHubClient {
         repo: &RepoRef,
         path: &NonRootRepoPath,
     ) -> Result<RepositoryFileContent, GitHubClientError> {
-        let url = contents_url(&self.api_base_url, repo, path.as_repo_path());
+        self.get_file_contents_at_reference(repo, path, None)
+    }
+
+    pub fn get_file_contents_at_ref(
+        &mut self,
+        repo: &RepoRef,
+        path: &NonRootRepoPath,
+        reference: &str,
+    ) -> Result<RepositoryFileContent, GitHubClientError> {
+        self.get_file_contents_at_reference(repo, path, Some(reference))
+    }
+
+    fn get_file_contents_at_reference(
+        &mut self,
+        repo: &RepoRef,
+        path: &NonRootRepoPath,
+        reference: Option<&str>,
+    ) -> Result<RepositoryFileContent, GitHubClientError> {
+        let url = contents_url(&self.api_base_url, repo, path.as_repo_path(), reference);
         match self.get_json::<RepositoryContents>(&url)? {
             RepositoryContents::File(file) => Ok(file),
             RepositoryContents::Directory(_) => Err(GitHubClientError::UnexpectedContentsShape {
@@ -227,7 +245,7 @@ impl GitHubClient {
         repo: &RepoRef,
         path: &RepoPath,
     ) -> Result<Vec<RepositoryDirectoryEntry>, GitHubClientError> {
-        let url = contents_url(&self.api_base_url, repo, path);
+        let url = contents_url(&self.api_base_url, repo, path, None);
         match self.get_json::<RepositoryContents>(&url)? {
             RepositoryContents::Directory(entries) => Ok(entries),
             RepositoryContents::File(_) => Err(GitHubClientError::UnexpectedContentsShape {
@@ -243,7 +261,7 @@ impl GitHubClient {
         path: &NonRootRepoPath,
         update: &UpdateRepositoryFile,
     ) -> Result<(), GitHubClientError> {
-        let url = contents_url(&self.api_base_url, repo, path.as_repo_path());
+        let url = contents_url(&self.api_base_url, repo, path.as_repo_path(), None);
         self.put_json::<serde_json::Value, _>(&url, update)
             .map(|_| ())
     }
@@ -800,13 +818,25 @@ fn unix_time_now() -> u64 {
         .as_secs()
 }
 
-fn contents_url(base_url: &str, repo: &RepoRef, path: &RepoPath) -> String {
+fn contents_url(
+    base_url: &str,
+    repo: &RepoRef,
+    path: &RepoPath,
+    reference: Option<&str>,
+) -> String {
     let base = format!("{base_url}/repos/{repo}/contents");
-    if path.is_root() {
+    let mut url = if path.is_root() {
         base
     } else {
         format!("{base}/{}", path.to_api_path())
+    };
+
+    if let Some(reference) = reference {
+        url.push_str("?ref=");
+        url.push_str(&percent_encode_query_value(reference));
     }
+
+    url
 }
 
 fn percent_encode_path_segment(segment: &str) -> String {
@@ -814,6 +844,21 @@ fn percent_encode_path_segment(segment: &str) -> String {
 
     for byte in segment.bytes() {
         if is_path_segment_byte_unreserved(byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+
+    encoded
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+
+    for byte in value.bytes() {
+        if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~') {
             encoded.push(char::from(byte));
         } else {
             encoded.push('%');
@@ -956,8 +1001,19 @@ mod tests {
         let path = RepoPath::new("dir name/file#1?.txt").unwrap();
 
         assert_eq!(
-            contents_url(GITHUB_API_BASE_URL, &repo, &path),
+            contents_url(GITHUB_API_BASE_URL, &repo, &path, None),
             "https://api.github.com/repos/owner/repo/contents/dir%20name/file%231%3F.txt"
+        );
+    }
+
+    #[test]
+    fn contents_url_appends_encoded_ref_query_parameter() {
+        let repo = RepoRef::new("owner", "repo");
+        let path = RepoPath::new(".github/workflows/ci.yml").unwrap();
+
+        assert_eq!(
+            contents_url(GITHUB_API_BASE_URL, &repo, &path, Some("release/v1&beta")),
+            "https://api.github.com/repos/owner/repo/contents/.github/workflows/ci.yml?ref=release%2Fv1%26beta"
         );
     }
 
