@@ -189,9 +189,14 @@ impl RepositoryActionUse {
     }
 
     fn rendered_with_version(&self, version: &str) -> String {
+        let comment = if version != self.version {
+            format!(" # {}", self.version)
+        } else {
+            String::new()
+        };
         match &self.subpath {
-            Some(subpath) => format!("{}/{subpath}@{version}", self.repo),
-            None => format!("{}@{version}", self.repo),
+            Some(subpath) => format!("{}/{subpath}@{version}{comment}", self.repo),
+            None => format!("{}@{version}{comment}", self.repo),
         }
     }
 }
@@ -1097,7 +1102,7 @@ mod tests {
                             .unwrap(),
                     )
                     .unwrap();
-                    assert!(decoded.contains(&format!("actions/checkout@{resolved_sha}")));
+                    assert!(decoded.contains(&format!("actions/checkout@{resolved_sha} # v4")));
                 },
                 "{}".to_owned(),
             ),
@@ -1115,7 +1120,7 @@ mod tests {
                             .starts_with("github-infra/pin-workflow-actions-")
                     );
                     assert!(json["body"].as_str().unwrap().contains(&format!(
-                        "actions/checkout@v4` -> `actions/checkout@{resolved_sha}"
+                        "actions/checkout@v4` -> `actions/checkout@{resolved_sha} # v4"
                     )));
                 },
                 r#"{"number":42,"html_url":"https://example.test/pr/42"}"#.to_owned(),
