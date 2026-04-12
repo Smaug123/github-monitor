@@ -1,5 +1,11 @@
 use std::fmt;
+#[cfg(test)]
+use std::io::{Read, Write};
+#[cfg(test)]
+use std::net::TcpListener;
 use std::thread;
+#[cfg(test)]
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -9,8 +15,9 @@ use ureq::http::header::HeaderMap;
 use ureq::{Agent, Body, Error as UreqError};
 
 use crate::github::types::{
-    GitTree, Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
-    RepositoryUpdate, Ruleset,
+    CommitRef, CreateGitReference, CreatePullRequest, GitReference, GitTree, PullRequest,
+    Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
+    RepositoryUpdate, Ruleset, UpdateRepositoryFile,
 };
 use crate::types::RepoRef;
 
@@ -182,12 +189,67 @@ impl GitHubClient {
         self.patch_json(&format!("{}/repos/{repo}", self.api_base_url), update)
     }
 
+    pub fn resolve_commit_sha(
+        &mut self,
+        repo: &RepoRef,
+        reference: &str,
+    ) -> Result<String, GitHubClientError> {
+        let encoded_reference = percent_encode_path_segment(reference);
+        let commit: CommitRef = self.get_json(&format!(
+            "{}/repos/{repo}/commits/{encoded_reference}",
+            self.api_base_url
+        ))?;
+        Ok(commit.sha)
+    }
+
+    pub fn create_git_reference(
+        &mut self,
+        repo: &RepoRef,
+        create: &CreateGitReference,
+    ) -> Result<GitReference, GitHubClientError> {
+        self.post_json(
+            &format!("{}/repos/{repo}/git/refs", self.api_base_url),
+            create,
+        )
+    }
+
+    pub fn delete_git_reference(
+        &mut self,
+        repo: &RepoRef,
+        reference: &str,
+    ) -> Result<(), GitHubClientError> {
+        let encoded_reference = percent_encode_path(reference);
+        self.send_delete(&format!(
+            "{}/repos/{repo}/git/refs/{encoded_reference}",
+            self.api_base_url
+        ))?;
+        Ok(())
+    }
+
     pub fn get_file_contents(
         &mut self,
         repo: &RepoRef,
         path: &NonRootRepoPath,
     ) -> Result<RepositoryFileContent, GitHubClientError> {
-        let url = contents_url(&self.api_base_url, repo, path.as_repo_path());
+        self.get_file_contents_at_reference(repo, path, None)
+    }
+
+    pub fn get_file_contents_at_ref(
+        &mut self,
+        repo: &RepoRef,
+        path: &NonRootRepoPath,
+        reference: &str,
+    ) -> Result<RepositoryFileContent, GitHubClientError> {
+        self.get_file_contents_at_reference(repo, path, Some(reference))
+    }
+
+    fn get_file_contents_at_reference(
+        &mut self,
+        repo: &RepoRef,
+        path: &NonRootRepoPath,
+        reference: Option<&str>,
+    ) -> Result<RepositoryFileContent, GitHubClientError> {
+        let url = contents_url(&self.api_base_url, repo, path.as_repo_path(), reference);
         match self.get_json::<RepositoryContents>(&url)? {
             RepositoryContents::File(file) => Ok(file),
             RepositoryContents::Directory(_) => Err(GitHubClientError::UnexpectedContentsShape {
@@ -202,7 +264,7 @@ impl GitHubClient {
         repo: &RepoRef,
         path: &RepoPath,
     ) -> Result<Vec<RepositoryDirectoryEntry>, GitHubClientError> {
-        let url = contents_url(&self.api_base_url, repo, path);
+        let url = contents_url(&self.api_base_url, repo, path, None);
         match self.get_json::<RepositoryContents>(&url)? {
             RepositoryContents::Directory(entries) => Ok(entries),
             RepositoryContents::File(_) => Err(GitHubClientError::UnexpectedContentsShape {
@@ -210,6 +272,25 @@ impl GitHubClient {
                 expected: "directory",
             }),
         }
+    }
+
+    pub fn update_file_contents(
+        &mut self,
+        repo: &RepoRef,
+        path: &NonRootRepoPath,
+        update: &UpdateRepositoryFile,
+    ) -> Result<(), GitHubClientError> {
+        let url = contents_url(&self.api_base_url, repo, path.as_repo_path(), None);
+        self.put_json::<serde_json::Value, _>(&url, update)
+            .map(|_| ())
+    }
+
+    pub fn create_pull_request(
+        &mut self,
+        repo: &RepoRef,
+        create: &CreatePullRequest,
+    ) -> Result<PullRequest, GitHubClientError> {
+        self.post_json(&format!("{}/repos/{repo}/pulls", self.api_base_url), create)
     }
 
     pub fn get_git_tree(
@@ -282,6 +363,36 @@ impl GitHubClient {
             })
     }
 
+    fn post_json<T, B>(&mut self, url: &str, body: &B) -> Result<T, GitHubClientError>
+    where
+        T: DeserializeOwned,
+        B: Serialize,
+    {
+        let mut response = self.send_post(url, body)?;
+        response
+            .body_mut()
+            .read_json()
+            .map_err(|source| GitHubClientError::Request {
+                url: url.to_owned(),
+                source,
+            })
+    }
+
+    fn put_json<T, B>(&mut self, url: &str, body: &B) -> Result<T, GitHubClientError>
+    where
+        T: DeserializeOwned,
+        B: Serialize,
+    {
+        let mut response = self.send_put(url, body)?;
+        response
+            .body_mut()
+            .read_json()
+            .map_err(|source| GitHubClientError::Request {
+                url: url.to_owned(),
+                source,
+            })
+    }
+
     fn send_get(&mut self, url: &str) -> Result<Response<Body>, GitHubClientError> {
         let mut retries = 0;
 
@@ -333,49 +444,87 @@ impl GitHubClient {
     where
         B: Serialize,
     {
-        let mut retries = 0;
+        self.send_serialized_mutation(url, body, |client, request_url, request_body| {
+            client.call_patch_once(request_url, request_body)
+        })
+    }
 
-        loop {
-            self.sleep_for_rate_limit_if_needed();
+    fn send_post<B>(&mut self, url: &str, body: &B) -> Result<Response<Body>, GitHubClientError>
+    where
+        B: Serialize,
+    {
+        self.send_serialized_mutation(url, body, |client, request_url, request_body| {
+            client.call_post_once(request_url, request_body)
+        })
+    }
 
-            match self.call_patch_once(url, body) {
-                Ok(mut response) => {
-                    self.update_rate_limit(response.headers());
+    fn send_put<B>(&mut self, url: &str, body: &B) -> Result<Response<Body>, GitHubClientError>
+    where
+        B: Serialize,
+    {
+        self.send_serialized_mutation(url, body, |client, request_url, request_body| {
+            client.call_put_once(request_url, request_body)
+        })
+    }
 
-                    if !response.status().is_success() {
-                        if let Some(delay) =
-                            retry_delay(retries, RetryTrigger::Status(response.status().as_u16()))
-                        {
-                            retries += 1;
-                            thread::sleep(delay);
-                            continue;
-                        }
+    fn send_delete(&mut self, url: &str) -> Result<Response<Body>, GitHubClientError> {
+        self.send_mutation(url, |client, request_url| {
+            client.call_delete_once(request_url)
+        })
+    }
 
-                        let body = response.body_mut().read_to_string().unwrap_or_default();
-                        return Err(GitHubClientError::UnexpectedStatus {
-                            url: url.to_owned(),
-                            status: response.status().as_u16(),
-                            body,
-                        });
-                    }
+    fn send_serialized_mutation<B, F>(
+        &mut self,
+        url: &str,
+        body: &B,
+        call: F,
+    ) -> Result<Response<Body>, GitHubClientError>
+    where
+        B: Serialize,
+        F: FnOnce(&Self, &str, &B) -> Result<Response<Body>, UreqError>,
+    {
+        self.sleep_for_rate_limit_if_needed();
 
-                    return Ok(response);
-                }
-                Err(source) => {
-                    if is_retryable_transport_error(&source)
-                        && let Some(delay) = retry_delay(retries, RetryTrigger::Network)
-                    {
-                        retries += 1;
-                        thread::sleep(delay);
-                        continue;
-                    }
+        match call(self, url, body) {
+            Ok(response) => self.validate_success_response(url, response),
+            Err(source) => Err(GitHubClientError::Request {
+                url: url.to_owned(),
+                source,
+            }),
+        }
+    }
 
-                    return Err(GitHubClientError::Request {
-                        url: url.to_owned(),
-                        source,
-                    });
-                }
-            }
+    fn send_mutation<F>(&mut self, url: &str, call: F) -> Result<Response<Body>, GitHubClientError>
+    where
+        F: FnOnce(&Self, &str) -> Result<Response<Body>, UreqError>,
+    {
+        self.sleep_for_rate_limit_if_needed();
+
+        match call(self, url) {
+            Ok(response) => self.validate_success_response(url, response),
+            Err(source) => Err(GitHubClientError::Request {
+                url: url.to_owned(),
+                source,
+            }),
+        }
+    }
+
+    fn validate_success_response(
+        &mut self,
+        url: &str,
+        mut response: Response<Body>,
+    ) -> Result<Response<Body>, GitHubClientError> {
+        self.update_rate_limit(response.headers());
+
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            Err(GitHubClientError::UnexpectedStatus {
+                url: url.to_owned(),
+                status: response.status().as_u16(),
+                body,
+            })
         }
     }
 
@@ -400,6 +549,42 @@ impl GitHubClient {
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .header("User-Agent", USER_AGENT)
             .send_json(body)
+    }
+
+    fn call_post_once<B>(&self, url: &str, body: &B) -> Result<Response<Body>, UreqError>
+    where
+        B: Serialize,
+    {
+        self.agent
+            .post(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", self.token.as_bearer_header())
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .header("User-Agent", USER_AGENT)
+            .send_json(body)
+    }
+
+    fn call_put_once<B>(&self, url: &str, body: &B) -> Result<Response<Body>, UreqError>
+    where
+        B: Serialize,
+    {
+        self.agent
+            .put(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", self.token.as_bearer_header())
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .header("User-Agent", USER_AGENT)
+            .send_json(body)
+    }
+
+    fn call_delete_once(&self, url: &str) -> Result<Response<Body>, UreqError> {
+        self.agent
+            .delete(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", self.token.as_bearer_header())
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .header("User-Agent", USER_AGENT)
+            .call()
     }
 
     fn sleep_for_rate_limit_if_needed(&self) {
@@ -600,13 +785,25 @@ fn unix_time_now() -> u64 {
         .as_secs()
 }
 
-fn contents_url(base_url: &str, repo: &RepoRef, path: &RepoPath) -> String {
+fn contents_url(
+    base_url: &str,
+    repo: &RepoRef,
+    path: &RepoPath,
+    reference: Option<&str>,
+) -> String {
     let base = format!("{base_url}/repos/{repo}/contents");
-    if path.is_root() {
+    let mut url = if path.is_root() {
         base
     } else {
         format!("{base}/{}", path.to_api_path())
+    };
+
+    if let Some(reference) = reference {
+        url.push_str("?ref=");
+        url.push_str(&percent_encode_query_value(reference));
     }
+
+    url
 }
 
 fn percent_encode_path_segment(segment: &str) -> String {
@@ -622,6 +819,28 @@ fn percent_encode_path_segment(segment: &str) -> String {
     }
 
     encoded
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+
+    for byte in value.bytes() {
+        if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+
+    encoded
+}
+
+fn percent_encode_path(path: &str) -> String {
+    path.split('/')
+        .map(percent_encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn is_path_segment_byte_unreserved(byte: u8) -> bool {
@@ -736,6 +955,78 @@ mod tests {
     }
 
     #[test]
+    fn patch_requests_do_not_retry_server_errors() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "PATCH",
+            "/repos/owner/repo",
+            500,
+            "{}",
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let error = client
+            .update_repository(
+                &RepoRef::new("owner", "repo"),
+                &RepositoryUpdate {
+                    allow_auto_merge: Some(true),
+                    ..RepositoryUpdate::default()
+                },
+            )
+            .unwrap_err();
+
+        assert_unexpected_status(error, 500);
+    }
+
+    #[test]
+    fn post_requests_do_not_retry_server_errors() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "POST",
+            "/repos/owner/repo/git/refs",
+            500,
+            "{}",
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let error = client
+            .create_git_reference(
+                &RepoRef::new("owner", "repo"),
+                &CreateGitReference {
+                    reference: "refs/heads/topic".to_owned(),
+                    sha: "abc123".to_owned(),
+                },
+            )
+            .unwrap_err();
+
+        assert_unexpected_status(error, 500);
+    }
+
+    #[test]
+    fn put_requests_do_not_retry_server_errors() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "PUT",
+            "/repos/owner/repo/contents/.github/workflows/ci.yml",
+            500,
+            "{}",
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let error = client
+            .update_file_contents(
+                &RepoRef::new("owner", "repo"),
+                &NonRootRepoPath::new(".github/workflows/ci.yml").unwrap(),
+                &UpdateRepositoryFile {
+                    message: "Pin actions".to_owned(),
+                    content: "Y29udGVudA==".to_owned(),
+                    sha: "blobsha".to_owned(),
+                    branch: "topic".to_owned(),
+                },
+            )
+            .unwrap_err();
+
+        assert_unexpected_status(error, 500);
+    }
+
+    #[test]
     fn repo_path_percent_encodes_reserved_characters() {
         let path = RepoPath::new("/dir name/workflow#1?.yml/").unwrap();
 
@@ -756,8 +1047,27 @@ mod tests {
         let path = RepoPath::new("dir name/file#1?.txt").unwrap();
 
         assert_eq!(
-            contents_url(GITHUB_API_BASE_URL, &repo, &path),
+            contents_url(GITHUB_API_BASE_URL, &repo, &path, None),
             "https://api.github.com/repos/owner/repo/contents/dir%20name/file%231%3F.txt"
+        );
+    }
+
+    #[test]
+    fn percent_encode_path_preserves_path_separators() {
+        assert_eq!(
+            percent_encode_path("heads/github-infra/pin workflow"),
+            "heads/github-infra/pin%20workflow"
+        );
+    }
+
+    #[test]
+    fn contents_url_appends_encoded_ref_query_parameter() {
+        let repo = RepoRef::new("owner", "repo");
+        let path = RepoPath::new(".github/workflows/ci.yml").unwrap();
+
+        assert_eq!(
+            contents_url(GITHUB_API_BASE_URL, &repo, &path, Some("release/v1&beta")),
+            "https://api.github.com/repos/owner/repo/contents/.github/workflows/ci.yml?ref=release%2Fv1%26beta"
         );
     }
 
@@ -801,5 +1111,106 @@ mod tests {
             .unwrap();
 
         assert!(!repo.default_branch.to_string().is_empty());
+    }
+
+    fn assert_unexpected_status(error: GitHubClientError, expected_status: u16) {
+        match error {
+            GitHubClientError::UnexpectedStatus { status, .. } => {
+                assert_eq!(status, expected_status);
+            }
+            other => panic!("expected unexpected status error, got {other:?}"),
+        }
+    }
+
+    struct ExpectedRequest {
+        method: &'static str,
+        path: &'static str,
+        status_code: u16,
+        response_body: &'static str,
+    }
+
+    impl ExpectedRequest {
+        fn new(
+            method: &'static str,
+            path: &'static str,
+            status_code: u16,
+            response_body: &'static str,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status_code,
+                response_body,
+            }
+        }
+    }
+
+    struct TestServer {
+        base_url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        fn spawn(expectations: Vec<ExpectedRequest>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                for expected in expectations {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let request = read_request(&mut stream);
+                    assert_eq!(request.method, expected.method);
+                    assert_eq!(request.path, expected.path);
+
+                    let response = format!(
+                        "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        expected.status_code,
+                        expected.response_body.len(),
+                        expected.response_body
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+
+            Self {
+                base_url: format!("http://{address}"),
+                handle: Some(handle),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            self.base_url.clone()
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().unwrap();
+            }
+        }
+    }
+
+    struct RecordedRequest {
+        method: String,
+        path: String,
+    }
+
+    fn read_request(stream: &mut impl Read) -> RecordedRequest {
+        let mut buffer = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !buffer.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            buffer.push(byte[0]);
+        }
+
+        let header_text = String::from_utf8(buffer).unwrap();
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().unwrap();
+        let mut request_parts = request_line.split_whitespace();
+
+        RecordedRequest {
+            method: request_parts.next().unwrap().to_owned(),
+            path: request_parts.next().unwrap().to_owned(),
+        }
     }
 }
