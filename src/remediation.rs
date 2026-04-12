@@ -5,7 +5,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::facts::RepoFacts;
-use crate::github::client::{GitHubClient, NonRootRepoPath};
+use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath};
 use crate::github::types::{
     ContentEncoding, CreateGitReference, CreatePullRequest, PullRequest, RepositoryFileContent,
     RepositoryUpdate, UpdateRepositoryFile,
@@ -400,42 +400,57 @@ fn create_workflow_pin_pull_request(
             )
         })?;
 
-        client
-            .update_file_contents(
-                &plan.repo,
-                &path,
-                &UpdateRepositoryFile {
-                    message: format!("Pin GitHub Actions to commit SHAs in {}", update.path),
-                    content: base64::engine::general_purpose::STANDARD
-                        .encode(update.content.as_bytes()),
-                    sha: update.sha.clone(),
-                    branch: branch_name.clone(),
-                },
-            )
-            .map_err(|error| {
-                format!(
-                    "failed to update workflow `{}` in `{}`: {error}",
-                    update.path, plan.repo
-                )
-            })?;
+        if let Err(error) = client.update_file_contents(
+            &plan.repo,
+            &path,
+            &UpdateRepositoryFile {
+                message: format!("Pin GitHub Actions to commit SHAs in {}", update.path),
+                content: base64::engine::general_purpose::STANDARD
+                    .encode(update.content.as_bytes()),
+                sha: update.sha.clone(),
+                branch: branch_name.clone(),
+            },
+        ) {
+            let failure = format!(
+                "failed to update workflow `{}` in `{}`: {error}",
+                update.path, plan.repo
+            );
+            return Err(cleanup_failed_workflow_pin_branch(
+                client,
+                plan,
+                &branch_name,
+                failure,
+            ));
+        }
     }
 
-    client
-        .create_pull_request(
-            &plan.repo,
-            &CreatePullRequest {
-                title: workflow_pin_pull_request_title(),
-                head: branch_name,
-                base: plan.default_branch.to_string(),
-                body: workflow_pin_pull_request_body(&prepared_updates),
-            },
-        )
-        .map_err(|error| {
-            format!(
+    match client.create_pull_request(
+        &plan.repo,
+        &CreatePullRequest {
+            title: workflow_pin_pull_request_title(),
+            head: branch_name.clone(),
+            base: plan.default_branch.to_string(),
+            body: workflow_pin_pull_request_body(&prepared_updates),
+        },
+    ) {
+        Ok(pull_request) => Ok(pull_request),
+        Err(error) => {
+            let failure = format!(
                 "failed to open pull request for workflow action pinning in `{}`: {error}",
                 plan.repo
-            )
-        })
+            );
+
+            match error {
+                GitHubClientError::UnexpectedStatus { .. } => Err(
+                    cleanup_failed_workflow_pin_branch(client, plan, &branch_name, failure),
+                ),
+                GitHubClientError::Request { .. } => Err(failure),
+                GitHubClientError::UnexpectedContentsShape { .. } => {
+                    unreachable!("pull request creation does not use repository contents endpoints")
+                }
+            }
+        }
+    }
 }
 
 fn prepare_workflow_updates(
@@ -662,13 +677,15 @@ fn record_workflow_action_pin(pins: &mut Vec<WorkflowActionPin>, action: Reposit
 }
 
 fn repository_action_use_from_reference(uses: &ActionReference) -> Option<RepositoryActionUse> {
-    match uses {
+    let action = match uses {
         ActionReference::Repository(action_ref) if !is_commit_sha(&action_ref.version) => {
             Some(RepositoryActionUse::from_action_ref(action_ref))
         }
         ActionReference::Repository(_) => None,
         ActionReference::Other(raw) => parse_literal_repository_action_use(raw),
-    }
+    }?;
+
+    repository_action_use_is_literal(&action).then_some(action)
 }
 
 fn parse_literal_repository_action_use(raw: &str) -> Option<RepositoryActionUse> {
@@ -697,6 +714,20 @@ fn parse_literal_repository_action_use(raw: &str) -> Option<RepositoryActionUse>
         subpath,
         version: version.to_owned(),
     })
+}
+
+fn repository_action_use_is_literal(action: &RepositoryActionUse) -> bool {
+    literal_action_component(&action.repo.owner.to_string())
+        && literal_action_component(&action.repo.name.to_string())
+        && action
+            .subpath
+            .as_ref()
+            .is_none_or(|subpath| literal_action_component(subpath))
+        && literal_action_component(&action.version)
+}
+
+fn literal_action_component(value: &str) -> bool {
+    !value.is_empty() && !value.contains("${{") && !value.chars().any(char::is_whitespace)
 }
 
 fn workflow_action_reference_is_pinned(uses: &ActionReference) -> bool {
@@ -785,6 +816,21 @@ fn decode_repository_text_file(file: &RepositoryFileContent) -> Result<String, S
             "workflow `{}` used unsupported encoding `{encoding}`",
             file.path
         )),
+    }
+}
+
+fn cleanup_failed_workflow_pin_branch(
+    client: &mut GitHubClient,
+    plan: &WorkflowPinPullRequestPlan,
+    branch_name: &str,
+    failure: String,
+) -> String {
+    match client.delete_git_reference(&plan.repo, &format!("heads/{branch_name}")) {
+        Ok(()) => failure,
+        Err(cleanup_error) => format!(
+            "{failure}; additionally failed to delete temporary branch `{branch_name}` in `{}`: {cleanup_error}",
+            plan.repo
+        ),
     }
 }
 
@@ -1015,6 +1061,31 @@ mod tests {
             fixes[0].planned_report().status,
             FixStatus::Rejected {
                 reason: "automatic fixes for workflow actions only support literal repository action references: .github/workflows/ci.yml uses owner/repo/path@feature@0123456789abcdef0123456789abcdef01234567".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn workflow_pin_fix_rejects_repository_action_refs_with_expressions() {
+        let mut facts = base_facts();
+        facts.workflows.push(workflow_with_action(
+            ".github/workflows/ci.yml",
+            ActionReference::Repository(ActionRef::new("${{ matrix.owner }}", "checkout", "v4")),
+        ));
+
+        let fixes = plan_repo_fixes(
+            &[Rule::new(
+                "WF002",
+                "Workflow actions are pinned to commit SHAs",
+                RuleKind::WorkflowActionsPinnedToSha,
+            )],
+            &facts,
+        );
+
+        assert_eq!(
+            fixes[0].planned_report().status,
+            FixStatus::Rejected {
+                reason: "automatic fixes for workflow actions only support literal repository action references: .github/workflows/ci.yml uses ${{ matrix.owner }}/checkout@v4".to_owned(),
             }
         );
     }
@@ -1338,10 +1409,120 @@ mod tests {
         assert_eq!(executed[0].status, FixStatus::Applied);
     }
 
+    #[test]
+    fn execute_repo_fixes_deletes_temporary_branch_after_pull_request_failure() {
+        let facts = bad_fixture();
+        let rules = vec![Rule::new(
+            "WF002",
+            "Workflow actions are pinned to commit SHAs",
+            RuleKind::WorkflowActionsPinnedToSha,
+        )];
+        let fixes = plan_repo_fixes(&rules, &facts);
+        let resolved_sha = "0123456789abcdef0123456789abcdef01234567";
+        let default_branch_sha = "fedcba9876543210fedcba9876543210fedcba98";
+        let workflow_yaml = concat!(
+            "name: Unsafe CI\n",
+            "on:\n",
+            "  pull_request_target:\n",
+            "jobs:\n",
+            "  build:\n",
+            "    runs-on: ubuntu-latest\n",
+            "    steps:\n",
+            "      - uses: actions/checkout@v4\n",
+            "      - run: echo unsafe\n",
+        );
+        let workflow_content = base64::engine::general_purpose::STANDARD.encode(workflow_yaml);
+        let branch_name = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let delete_branch_name = branch_name.clone();
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/bad-repo/commits/main",
+                |_| {},
+                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
+            ),
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/bad-repo/contents/.github/workflows/unsafe.yml?ref=fedcba9876543210fedcba9876543210fedcba98",
+                |_| {},
+                format!(
+                    r#"{{"name":"unsafe.yml","path":".github/workflows/unsafe.yml","sha":"blobsha","type":"file","encoding":"base64","content":"{workflow_content}"}}"#
+                ),
+            ),
+            ExpectedRequest::json(
+                "GET",
+                "/repos/actions/checkout/commits/v4",
+                |_| {},
+                format!(r#"{{"sha":"{resolved_sha}"}}"#),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/bad-repo/git/refs",
+                {
+                    let branch_name = branch_name.clone();
+                    move |body| {
+                        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                        let reference = json["ref"].as_str().unwrap();
+                        let branch = reference.strip_prefix("refs/heads/").unwrap().to_owned();
+                        *branch_name.lock().unwrap() = Some(branch);
+                    }
+                },
+                r#"{"ref":"refs/heads/topic","object":{"sha":"abc123","type":"commit"}}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/bad-repo/contents/.github/workflows/unsafe.yml",
+                |_| {},
+                "{}".to_owned(),
+            ),
+            ExpectedRequest::with_status_and_path_assertion(
+                "POST",
+                |path| assert_eq!(path, "/repos/example-org/bad-repo/pulls"),
+                |_| {},
+                500,
+                "{}".to_owned(),
+            ),
+            ExpectedRequest::with_status_and_path_assertion(
+                "DELETE",
+                move |path| {
+                    let branch = delete_branch_name
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("branch name should have been captured");
+                    assert_eq!(
+                        path,
+                        format!("/repos/example-org/bad-repo/git/refs/heads/{branch}")
+                    );
+                },
+                |_| {},
+                204,
+                String::new(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        match &executed[0].status {
+            FixStatus::Failed { reason } => {
+                assert!(reason.contains("failed to open pull request for workflow action pinning"));
+                assert!(!reason.contains("failed to delete temporary branch"));
+            }
+            other => panic!("expected failed status, got {other:?}"),
+        }
+    }
+
     struct ExpectedRequest {
         method: &'static str,
-        path: &'static str,
+        assert_path: Box<dyn Fn(&str) + Send>,
         assert_body: Box<dyn Fn(&str) + Send>,
+        status_code: u16,
         response_body: String,
     }
 
@@ -1352,10 +1533,30 @@ mod tests {
             assert_body: impl Fn(&str) + Send + 'static,
             response_body: String,
         ) -> Self {
+            Self::with_status_and_path_assertion(
+                method,
+                {
+                    let path = path.to_owned();
+                    move |request_path| assert_eq!(request_path, path)
+                },
+                assert_body,
+                200,
+                response_body,
+            )
+        }
+
+        fn with_status_and_path_assertion(
+            method: &'static str,
+            assert_path: impl Fn(&str) + Send + 'static,
+            assert_body: impl Fn(&str) + Send + 'static,
+            status_code: u16,
+            response_body: String,
+        ) -> Self {
             Self {
                 method,
-                path,
+                assert_path: Box::new(assert_path),
                 assert_body: Box::new(assert_body),
+                status_code,
                 response_body,
             }
         }
@@ -1375,11 +1576,12 @@ mod tests {
                     let (mut stream, _) = listener.accept().unwrap();
                     let request = read_request(&mut stream);
                     assert_eq!(request.method, expected.method);
-                    assert_eq!(request.path, expected.path);
+                    (expected.assert_path)(&request.path);
                     (expected.assert_body)(&request.body);
 
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        expected.status_code,
                         expected.response_body.len(),
                         expected.response_body
                     );
