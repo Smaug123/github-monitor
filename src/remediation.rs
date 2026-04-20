@@ -500,7 +500,7 @@ fn prepare_workflow_updates(
             let from = pin.action.to_string();
             let to = pin.action.rendered_with_version(&resolved_sha);
             let tag_comment = pin.action.tag_comment(&resolved_sha);
-            let (updated_content, replacements) =
+            let (updated_content, replacements, effective_comment) =
                 replace_uses_line_value(&content, &from, &to, tag_comment)?;
 
             if replacements != pin.occurrences {
@@ -514,7 +514,7 @@ fn prepare_workflow_updates(
             changes.push(WorkflowPinChange {
                 from,
                 to,
-                tag_comment: tag_comment.map(str::to_owned),
+                tag_comment: effective_comment,
             });
         }
 
@@ -761,7 +761,7 @@ fn replace_uses_line_value(
     from: &str,
     to: &str,
     tag_comment: Option<&str>,
-) -> Result<(String, usize), String> {
+) -> Result<(String, usize, Option<String>), String> {
     let pattern = Regex::new(&format!(
         r#"(?m)^([ \t-]*uses:[ \t]*['"]?){}(['"]?)([ \t]*(?:#[^\r\n]*)?)(\r?)$"#,
         regex::escape(from)
@@ -769,6 +769,7 @@ fn replace_uses_line_value(
     .map_err(|error| format!("invalid workflow replacement pattern for `{from}`: {error}"))?;
 
     let replacements = pattern.captures_iter(text).count();
+    let effective_comment = std::cell::Cell::new(None);
     let updated = pattern
         .replace_all(text, |captures: &regex::Captures<'_>| {
             let prefix = &captures[1];
@@ -780,11 +781,15 @@ fn replace_uses_line_value(
                 (Some(tag), false) => format!(" # {tag}"),
                 _ => existing_comment.to_owned(),
             };
+            let tag_text = comment
+                .find('#')
+                .map(|i| comment[i + 1..].trim().to_owned());
+            effective_comment.set(tag_text);
             format!("{prefix}{to}{close_quote}{comment}{cr}")
         })
         .into_owned();
 
-    Ok((updated, replacements))
+    Ok((updated, replacements, effective_comment.into_inner()))
 }
 
 fn decode_repository_text_file(file: &RepositoryFileContent) -> Result<String, String> {
@@ -1093,7 +1098,7 @@ mod tests {
     #[test]
     fn replace_uses_line_value_preserves_quotes_and_existing_comments() {
         let source = "      - uses: \"actions/checkout@v4\" # keep me\n";
-        let (updated, replacements) = replace_uses_line_value(
+        let (updated, replacements, effective_comment) = replace_uses_line_value(
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
@@ -1106,12 +1111,13 @@ mod tests {
             updated,
             "      - uses: \"actions/checkout@0123456789abcdef0123456789abcdef01234567\" # keep me\n"
         );
+        assert_eq!(effective_comment.as_deref(), Some("keep me"));
     }
 
     #[test]
     fn replace_uses_line_value_preserves_crlf_line_endings() {
         let source = "      - uses: actions/checkout@v4\r\n";
-        let (updated, replacements) = replace_uses_line_value(
+        let (updated, replacements, effective_comment) = replace_uses_line_value(
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
@@ -1124,12 +1130,13 @@ mod tests {
             updated,
             "      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\r\n"
         );
+        assert_eq!(effective_comment, None);
     }
 
     #[test]
     fn replace_uses_line_value_places_tag_comment_outside_quotes() {
         let source = "      - uses: \"actions/checkout@v4\"\n";
-        let (updated, replacements) = replace_uses_line_value(
+        let (updated, replacements, effective_comment) = replace_uses_line_value(
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
@@ -1142,12 +1149,13 @@ mod tests {
             updated,
             "      - uses: \"actions/checkout@0123456789abcdef0123456789abcdef01234567\" # v4\n"
         );
+        assert_eq!(effective_comment.as_deref(), Some("v4"));
     }
 
     #[test]
     fn replace_uses_line_value_tag_comment_unquoted() {
         let source = "      - uses: actions/checkout@v4\n";
-        let (updated, replacements) = replace_uses_line_value(
+        let (updated, replacements, effective_comment) = replace_uses_line_value(
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
@@ -1160,12 +1168,13 @@ mod tests {
             updated,
             "      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v4\n"
         );
+        assert_eq!(effective_comment.as_deref(), Some("v4"));
     }
 
     #[test]
     fn replace_uses_line_value_preserves_existing_comment_over_tag() {
         let source = "      - uses: \"actions/checkout@v4\" # pinned for security\n";
-        let (updated, replacements) = replace_uses_line_value(
+        let (updated, replacements, effective_comment) = replace_uses_line_value(
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
@@ -1178,12 +1187,13 @@ mod tests {
             updated,
             "      - uses: \"actions/checkout@0123456789abcdef0123456789abcdef01234567\" # pinned for security\n"
         );
+        assert_eq!(effective_comment.as_deref(), Some("pinned for security"));
     }
 
     #[test]
     fn replace_uses_line_value_tag_comment_with_crlf() {
         let source = "      - uses: \"actions/checkout@v4\"\r\n";
-        let (updated, replacements) = replace_uses_line_value(
+        let (updated, replacements, effective_comment) = replace_uses_line_value(
             source,
             "actions/checkout@v4",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
@@ -1196,6 +1206,7 @@ mod tests {
             updated,
             "      - uses: \"actions/checkout@0123456789abcdef0123456789abcdef01234567\" # v4\r\n"
         );
+        assert_eq!(effective_comment.as_deref(), Some("v4"));
     }
 
     #[test]
