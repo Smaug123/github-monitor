@@ -652,6 +652,11 @@ mod tests {
             let labels = stream["stream"].as_object().expect("stream labels");
             assert_eq!(labels["job"].as_str(), Some("github-infra"));
             assert!(labels.contains_key("repo"));
+            let run_id = labels
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+                .expect("run_id label");
+            assert!(run_id.parse::<u128>().is_ok());
             let values = stream["values"].as_array().expect("values should be array");
             for value in values {
                 let pair = value.as_array().expect("value pair");

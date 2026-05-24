@@ -153,7 +153,15 @@ The top-level JSON value is an array of per-repository reports:
 
 ### Loki Output
 
-Use `--format loki` to emit a Grafana Loki push payload as JSON. Each repo gets one stream labelled `{job="github-infra", repo="<owner>/<name>"}`, with one log line per rule outcome containing `rule_id`, `name`, `status`, and (for non-pass) `reason`.
+Use `--format loki` to emit a Grafana Loki push payload as JSON. Each repo gets one stream labelled `{job="github-infra", repo="<owner>/<name>", run_id="<ns>"}`, with one log line per rule outcome containing `rule_id`, `name`, `status`, and (for non-pass) `reason`.
+
+`run_id` is the run's start time in nanoseconds since the Unix epoch, stringified, and is identical for every stream of a single run. It lives on the stream labels so it can drive Grafana's `label_values` template variable directly:
+
+```logql
+label_values({job="github-infra"}, run_id)
+```
+
+Panels then constrain their stream selector with `run_id="$run_id"`. The bundled `dashboards/compliance.json` wires this up sorted descending, so the default is the most recent run.
 
 ```sh
 cargo run -- --config repos.toml --format loki | \

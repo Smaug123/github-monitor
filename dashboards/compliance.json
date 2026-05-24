@@ -44,6 +44,20 @@
         "includeAll": true,
         "allValue": ".+",
         "skipUrlSync": false
+      },
+      {
+        "name": "run_id",
+        "type": "query",
+        "label": "Run",
+        "description": "Defaults to the most recent run_id. Pick an older value to inspect a historical run.",
+        "datasource": { "type": "loki", "uid": "${datasource}" },
+        "query": "label_values({job=\"$job\"}, run_id)",
+        "definition": "label_values({job=\"$job\"}, run_id)",
+        "refresh": 2,
+        "sort": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "current": {}
       }
     ]
   },
@@ -52,14 +66,14 @@
       "id": 1,
       "type": "stat",
       "title": "Failing outcomes",
-      "description": "Count of fail/error log lines across selected repos in the dashboard time range.",
+      "description": "Count of fail/error log lines for the selected run.",
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "sum(count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=~\"fail|error\" [$__range]))",
+          "expr": "sum(count_over_time({job=\"$job\", repo=~\"$repo\", run_id=\"$run_id\"} | json | status=~\"fail|error\" [$__range]))",
           "queryType": "instant"
         }
       ],
@@ -91,7 +105,7 @@
         {
           "refId": "A",
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "sum(count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=\"pass\" [$__range]))",
+          "expr": "sum(count_over_time({job=\"$job\", repo=~\"$repo\", run_id=\"$run_id\"} | json | status=\"pass\" [$__range]))",
           "queryType": "instant"
         }
       ],
@@ -110,14 +124,14 @@
       "id": 3,
       "type": "barchart",
       "title": "Failures by rule",
-      "description": "Failing rule outcomes grouped by rule id, across selected repos in the dashboard time range.",
+      "description": "Failing rule outcomes grouped by rule id, for the selected run.",
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "gridPos": { "h": 10, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "sum by (rule_id) (count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=~\"fail|error\" [$__range]))",
+          "expr": "sum by (rule_id) (count_over_time({job=\"$job\", repo=~\"$repo\", run_id=\"$run_id\"} | json | status=~\"fail|error\" [$__range]))",
           "queryType": "instant"
         }
       ],
@@ -135,15 +149,15 @@
     {
       "id": 4,
       "type": "table",
-      "title": "Failures by repo (selected range)",
-      "description": "Per-repo count of fail/error outcomes.",
+      "title": "Failures by repo",
+      "description": "Per-repo count of fail/error outcomes for the selected run.",
       "datasource": { "type": "loki", "uid": "${datasource}" },
       "gridPos": { "h": 5, "w": 12, "x": 0, "y": 5 },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "sum by (repo) (count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=~\"fail|error\" [$__range]))",
+          "expr": "sum by (repo) (count_over_time({job=\"$job\", repo=~\"$repo\", run_id=\"$run_id\"} | json | status=~\"fail|error\" [$__range]))",
           "queryType": "instant"
         }
       ],
@@ -197,7 +211,7 @@
         {
           "refId": "A",
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "{job=\"$job\"}",
+          "expr": "{job=\"$job\", run_id=\"$run_id\"}",
           "queryType": "range",
           "maxLines": 50
         }
@@ -227,7 +241,7 @@
         {
           "refId": "A",
           "datasource": { "type": "loki", "uid": "${datasource}" },
-          "expr": "{job=\"$job\", repo=~\"$repo\"} | json",
+          "expr": "{job=\"$job\", repo=~\"$repo\", run_id=\"$run_id\"} | json",
           "queryType": "range",
           "maxLines": 5000
         }

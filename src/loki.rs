@@ -35,6 +35,7 @@ struct RuleLogLine {
 
 pub fn build_payload(reports: &[RepoReport], job_label: &str, now_ns: u128) -> LokiPayload {
     let mut streams = Vec::with_capacity(reports.len());
+    let run_id = now_ns.to_string();
     let mut next_ns = now_ns;
 
     for report in reports {
@@ -45,6 +46,7 @@ pub fn build_payload(reports: &[RepoReport], job_label: &str, now_ns: u128) -> L
         let mut labels = BTreeMap::new();
         labels.insert("job".to_owned(), job_label.to_owned());
         labels.insert("repo".to_owned(), report.repo.to_string());
+        labels.insert("run_id".to_owned(), run_id.clone());
 
         let mut values = Vec::with_capacity(report.rules.len());
         for rule in &report.rules {
@@ -201,16 +203,22 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_emits_one_stream_per_repo_with_low_cardinality_labels() {
-        let payload = build_payload(&sample_reports(), "github-infra", 1_700_000_000_000_000_000);
+    fn build_payload_emits_one_stream_per_repo_labelled_by_job_repo_and_run_id() {
+        let now_ns: u128 = 1_700_000_000_000_000_000;
+        let payload = build_payload(&sample_reports(), "github-infra", now_ns);
 
         assert_eq!(payload.streams.len(), 2);
+        let expected_run_id = now_ns.to_string();
         for stream in &payload.streams {
             let keys: Vec<&str> = stream.stream.keys().map(String::as_str).collect();
-            assert_eq!(keys, vec!["job", "repo"]);
+            assert_eq!(keys, vec!["job", "repo", "run_id"]);
             assert_eq!(
                 stream.stream.get("job").map(String::as_str),
                 Some("github-infra")
+            );
+            assert_eq!(
+                stream.stream.get("run_id").map(String::as_str),
+                Some(expected_run_id.as_str())
             );
         }
         assert_eq!(
@@ -260,6 +268,20 @@ mod tests {
         let fail_line = &payload.streams[0].values[1].1;
         assert!(fail_line.contains("\"status\":\"fail\""));
         assert!(fail_line.contains("\"reason\":\"unsafe.yml\""));
+    }
+
+    #[test]
+    fn run_id_does_not_leak_into_the_log_body() {
+        let payload = build_payload(&sample_reports(), "github-infra", 1_700_000_000_000_000_000);
+        for stream in &payload.streams {
+            for LokiValue(_, body) in &stream.values {
+                let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert!(
+                    parsed.get("run_id").is_none(),
+                    "run_id should live on stream labels only, got body {body}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -325,6 +347,21 @@ mod tests {
             }
             let unique: std::collections::HashSet<&String> = all_ts.iter().collect();
             prop_assert_eq!(all_ts.len(), unique.len());
+        }
+
+        #[test]
+        fn every_stream_carries_run_id_label_equal_to_now_ns(
+            reports in proptest::collection::vec(repo_report_strategy(), 0..5),
+            now in any::<u64>(),
+        ) {
+            let payload = build_payload(&reports, "github-infra", u128::from(now));
+            let expected = u128::from(now).to_string();
+            for stream in &payload.streams {
+                prop_assert_eq!(
+                    stream.stream.get("run_id").map(String::as_str),
+                    Some(expected.as_str())
+                );
+            }
         }
     }
 
