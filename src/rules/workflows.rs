@@ -1,8 +1,11 @@
 use crate::facts::RepoFacts;
-use crate::workflow::model::{ActionReference, Step, Workflow};
+use crate::workflow::model::{ActionReference, Job, Step, Workflow};
 
 use super::glob::{branch_matches_filters, branch_pattern_matches};
 use super::{RuleKind, RuleResult};
+
+const REQUIRED_CHECKS_JOB_NAME: &str = "all-required-checks-complete";
+const REQUIRED_CHECKS_ACTION: &str = "G-Research/common-actions/check-required-lite";
 
 pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     match kind {
@@ -108,8 +111,84 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
+        RuleKind::WorkflowHasRequiredChecksComplete => evaluate_required_checks_complete(facts),
         _ => unreachable!("non-workflow rule passed to workflows::evaluate"),
     }
+}
+
+fn evaluate_required_checks_complete(facts: &RepoFacts) -> RuleResult {
+    let candidates = facts
+        .workflows
+        .iter()
+        .filter_map(|workflow_file| {
+            workflow_file
+                .workflow
+                .jobs
+                .get(REQUIRED_CHECKS_JOB_NAME)
+                .map(|job| (workflow_file.path.as_str(), job))
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return RuleResult::Fail {
+            reason: format!("no workflow defines the job `{REQUIRED_CHECKS_JOB_NAME}`"),
+        };
+    }
+
+    if candidates
+        .iter()
+        .any(|(_, job)| required_checks_job_is_valid(job))
+    {
+        return RuleResult::Pass;
+    }
+
+    let details = candidates
+        .iter()
+        .map(|(path, job)| format!("{path}: {}", describe_job_issues(job)))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    RuleResult::Fail {
+        reason: format!("job `{REQUIRED_CHECKS_JOB_NAME}` is misconfigured ({details})",),
+    }
+}
+
+fn required_checks_job_is_valid(job: &Job) -> bool {
+    condition_is_always(job.condition.as_deref())
+        && job
+            .steps
+            .iter()
+            .any(|step| step_uses_action(step, REQUIRED_CHECKS_ACTION))
+}
+
+fn describe_job_issues(job: &Job) -> String {
+    let mut issues = Vec::new();
+
+    if !condition_is_always(job.condition.as_deref()) {
+        let actual = job.condition.as_deref().unwrap_or("<missing>");
+        issues.push(format!(
+            "if-condition is `{actual}` but must be `${{{{ always() }}}}`"
+        ));
+    }
+
+    if !job
+        .steps
+        .iter()
+        .any(|step| step_uses_action(step, REQUIRED_CHECKS_ACTION))
+    {
+        issues.push(format!("no step uses `{REQUIRED_CHECKS_ACTION}`"));
+    }
+
+    issues.join("; ")
+}
+
+fn condition_is_always(condition: Option<&str>) -> bool {
+    let Some(condition) = condition else {
+        return false;
+    };
+
+    let normalized: String = condition.chars().filter(|ch| !ch.is_whitespace()).collect();
+    normalized == "${{always()}}"
 }
 
 fn workflow_runs_on_push_to_branch(workflow: &Workflow, branch: &str) -> bool {

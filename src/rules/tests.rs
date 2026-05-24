@@ -401,6 +401,7 @@ fn rule_kind_strategy() -> impl Strategy<Value = RuleKind> {
         (identifier(), identifier()).prop_map(|(owner, repo)| RuleKind::WorkflowUsesAction {
             action: format!("{owner}/{repo}"),
         }),
+        Just(RuleKind::WorkflowHasRequiredChecksComplete),
         path_fragment().prop_map(|path| RuleKind::FileExists { path }),
         Just(RuleKind::NixFlakeExists),
         Just(RuleKind::NixFlakeHasCheck),
@@ -1187,6 +1188,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("WF001".to_owned(), "pass"),
         ("WF002".to_owned(), "pass"),
         ("WF003".to_owned(), "pass"),
+        ("WF004".to_owned(), "pass"),
     ]);
 
     assert_eq!(actual, expected);
@@ -1219,6 +1221,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("WF001".to_owned(), "fail"),
         ("WF002".to_owned(), "fail"),
         ("WF003".to_owned(), "fail"),
+        ("WF004".to_owned(), "fail"),
     ]);
 
     assert_eq!(actual, expected);
@@ -1394,6 +1397,191 @@ fn ruleset_with_empty_include_does_not_apply() {
         evaluate(&RuleKind::RulesetExists, &facts),
         RuleResult::Fail { .. }
     ));
+}
+
+fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> WorkflowFile {
+    WorkflowFile {
+        path: ".github/workflows/ci.yml".to_owned(),
+        workflow: Workflow {
+            name: Some("CI".to_owned()),
+            triggers: Triggers {
+                push: Some(TriggerFilter {
+                    branches: vec!["main".to_owned()],
+                    branches_ignore: Vec::new(),
+                    tags: Vec::new(),
+                    tags_ignore: Vec::new(),
+                    paths: Vec::new(),
+                }),
+                pull_request: None,
+                pull_request_target: None,
+                workflow_dispatch: None,
+            },
+            jobs: BTreeMap::from([(
+                "all-required-checks-complete".to_owned(),
+                Job {
+                    runs_on: None,
+                    steps,
+                    needs: Vec::new(),
+                    condition: condition.map(str::to_owned),
+                },
+            )]),
+        },
+    }
+}
+
+fn check_required_lite_step() -> Step {
+    action_step(ActionReference::Other(
+        "G-Research/common-actions/check-required-lite@2b7dc49cb14f3344fbe6019c14a31165e258c059"
+            .to_owned(),
+    ))
+}
+
+#[test]
+fn workflow_has_required_checks_complete_passes_for_canonical_shape() {
+    let mut facts = base_facts();
+    facts.workflows = vec![required_checks_workflow(
+        Some("${{ always() }}"),
+        vec![check_required_lite_step()],
+    )];
+
+    assert_eq!(
+        evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn workflow_has_required_checks_complete_tolerates_extra_whitespace() {
+    let mut facts = base_facts();
+    facts.workflows = vec![required_checks_workflow(
+        Some("${{  always()  }}"),
+        vec![check_required_lite_step()],
+    )];
+
+    assert_eq!(
+        evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn workflow_has_required_checks_complete_fails_when_job_absent() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_with_single_job(
+        "build",
+        vec![check_required_lite_step()],
+    )];
+
+    let result = evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts);
+    let RuleResult::Fail { reason } = result else {
+        panic!("expected Fail, got {result:?}");
+    };
+    assert!(
+        reason.contains("no workflow defines the job"),
+        "unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn workflow_has_required_checks_complete_fails_when_action_missing() {
+    let mut facts = base_facts();
+    facts.workflows = vec![required_checks_workflow(
+        Some("${{ always() }}"),
+        vec![run_step("echo done")],
+    )];
+
+    let result = evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts);
+    let RuleResult::Fail { reason } = result else {
+        panic!("expected Fail, got {result:?}");
+    };
+    assert!(
+        reason.contains("no step uses `G-Research/common-actions/check-required-lite`"),
+        "unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn workflow_has_required_checks_complete_fails_when_if_condition_missing() {
+    let mut facts = base_facts();
+    facts.workflows = vec![required_checks_workflow(
+        None,
+        vec![check_required_lite_step()],
+    )];
+
+    let result = evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts);
+    let RuleResult::Fail { reason } = result else {
+        panic!("expected Fail, got {result:?}");
+    };
+    assert!(
+        reason.contains("if-condition is `<missing>`"),
+        "unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn workflow_has_required_checks_complete_fails_for_wrong_if_condition() {
+    let mut facts = base_facts();
+    facts.workflows = vec![required_checks_workflow(
+        Some("${{ success() }}"),
+        vec![check_required_lite_step()],
+    )];
+
+    let result = evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts);
+    let RuleResult::Fail { reason } = result else {
+        panic!("expected Fail, got {result:?}");
+    };
+    assert!(
+        reason.contains("if-condition is `${{ success() }}`"),
+        "unexpected reason: {reason}"
+    );
+}
+
+#[test]
+fn workflow_has_required_checks_complete_rejects_bare_always_without_wrapper() {
+    let mut facts = base_facts();
+    facts.workflows = vec![required_checks_workflow(
+        Some("always()"),
+        vec![check_required_lite_step()],
+    )];
+
+    assert!(matches!(
+        evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn workflow_has_required_checks_complete_passes_when_one_of_many_jobs_matches() {
+    let mut facts = base_facts();
+    facts.workflows = vec![
+        required_checks_workflow(Some("${{ success() }}"), vec![check_required_lite_step()]),
+        WorkflowFile {
+            path: ".github/workflows/release.yml".to_owned(),
+            workflow: Workflow {
+                name: Some("Release".to_owned()),
+                triggers: Triggers {
+                    push: None,
+                    pull_request: None,
+                    pull_request_target: None,
+                    workflow_dispatch: None,
+                },
+                jobs: BTreeMap::from([(
+                    "all-required-checks-complete".to_owned(),
+                    Job {
+                        runs_on: None,
+                        steps: vec![check_required_lite_step()],
+                        needs: Vec::new(),
+                        condition: Some("${{ always() }}".to_owned()),
+                    },
+                )]),
+            },
+        },
+    ];
+
+    assert_eq!(
+        evaluate(&RuleKind::WorkflowHasRequiredChecksComplete, &facts),
+        RuleResult::Pass
+    );
 }
 
 #[test]

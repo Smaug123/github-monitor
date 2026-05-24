@@ -30,7 +30,8 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
         | RuleKind::WorkflowHasJob { .. }
         | RuleKind::WorkflowActionsPinnedToSha
         | RuleKind::NoPullRequestTargetWithCheckout
-        | RuleKind::WorkflowUsesAction { .. } => workflows::evaluate(kind, facts),
+        | RuleKind::WorkflowUsesAction { .. }
+        | RuleKind::WorkflowHasRequiredChecksComplete => workflows::evaluate(kind, facts),
         RuleKind::FileExists { .. } | RuleKind::NixFlakeExists | RuleKind::NixFlakeHasCheck => {
             files::evaluate(kind, facts)
         }

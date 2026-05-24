@@ -106,6 +106,7 @@ pub enum RuleKind {
     WorkflowUsesAction {
         action: String,
     },
+    WorkflowHasRequiredChecksComplete,
     FileExists {
         path: String,
     },

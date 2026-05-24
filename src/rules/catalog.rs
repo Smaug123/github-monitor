@@ -47,6 +47,11 @@ pub fn default_rules() -> Vec<Rule> {
             "No pull_request_target workflow checks out code",
             RuleKind::NoPullRequestTargetWithCheckout,
         ),
+        Rule::new(
+            "WF004",
+            "Workflow has an all-required-checks-complete aggregator job",
+            RuleKind::WorkflowHasRequiredChecksComplete,
+        ),
         Rule::new("NX001", "flake.nix exists", RuleKind::NixFlakeExists),
         Rule::new(
             "NX002",
