@@ -39,7 +39,8 @@
             ]
           }
         }
-      }
+      },
+      "raw_yaml": "name: Unsafe CI\non:\n  pull_request_target: {}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo unsafe\n"
     }
   ],
   "files_present": [

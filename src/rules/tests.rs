@@ -342,8 +342,16 @@ fn workflow_strategy() -> impl Strategy<Value = Workflow> {
 }
 
 fn workflow_file_strategy() -> impl Strategy<Value = WorkflowFile> {
-    (path_fragment(), workflow_strategy())
-        .prop_map(|(path, workflow)| WorkflowFile { path, workflow })
+    (
+        path_fragment(),
+        workflow_strategy(),
+        proptest::option::of(any::<String>()),
+    )
+        .prop_map(|(path, workflow, raw_yaml)| WorkflowFile {
+            path,
+            workflow,
+            raw_yaml,
+        })
 }
 
 fn repo_facts_strategy() -> impl Strategy<Value = RepoFacts> {
@@ -546,6 +554,7 @@ fn active_branch_ruleset(rules: Vec<RulesetRule>) -> Ruleset {
 fn workflow_with_single_job(job_name: &str, steps: Vec<Step>) -> WorkflowFile {
     WorkflowFile {
         path: ".github/workflows/ci.yml".to_owned(),
+        raw_yaml: None,
         workflow: Workflow {
             name: Some("CI".to_owned()),
             triggers: Triggers {
@@ -1059,6 +1068,7 @@ fn workflow_exists_for_default_branch_respects_single_star_slash_boundaries() {
     facts.default_branch = BranchName::new("release/train/main");
     facts.workflows = vec![WorkflowFile {
         path: ".github/workflows/release.yml".to_owned(),
+        raw_yaml: None,
         workflow: Workflow {
             name: Some("Release".to_owned()),
             triggers: Triggers {
@@ -1089,6 +1099,7 @@ fn workflow_exists_for_default_branch_supports_double_star_and_negation_order() 
     facts.default_branch = BranchName::new("release/beta/3-alpha");
     facts.workflows = vec![WorkflowFile {
         path: ".github/workflows/release.yml".to_owned(),
+        raw_yaml: None,
         workflow: Workflow {
             name: Some("Release".to_owned()),
             triggers: Triggers {
@@ -1118,6 +1129,7 @@ fn workflow_exists_for_default_branch_respects_branches_ignore() {
     let mut facts = base_facts();
     facts.workflows = vec![WorkflowFile {
         path: ".github/workflows/ci.yml".to_owned(),
+        raw_yaml: None,
         workflow: Workflow {
             name: Some("CI".to_owned()),
             triggers: Triggers {
@@ -1173,6 +1185,7 @@ fn workflow_exists_for_default_branch_ignores_tags_only_push_workflows() {
     let mut facts = base_facts();
     facts.workflows = vec![WorkflowFile {
         path: ".github/workflows/release.yml".to_owned(),
+        raw_yaml: None,
         workflow: Workflow {
             name: Some("Release".to_owned()),
             triggers: Triggers {
@@ -1471,6 +1484,7 @@ fn ruleset_with_empty_include_does_not_apply() {
 fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> WorkflowFile {
     WorkflowFile {
         path: ".github/workflows/ci.yml".to_owned(),
+        raw_yaml: None,
         workflow: Workflow {
             name: Some("CI".to_owned()),
             triggers: Triggers {
@@ -1626,6 +1640,7 @@ fn workflow_has_required_checks_complete_passes_when_one_of_many_jobs_matches() 
         required_checks_workflow(Some("${{ success() }}"), vec![check_required_lite_step()]),
         WorkflowFile {
             path: ".github/workflows/release.yml".to_owned(),
+            raw_yaml: None,
             workflow: Workflow {
                 name: Some("Release".to_owned()),
                 triggers: Triggers {

@@ -1,7 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::facts::RepoFacts;
@@ -885,6 +884,7 @@ fn plan_add_ruleset_rule(facts: &RepoFacts, missing: RulesetRuleType) -> FixPlan
 fn plan_workflow_pin_pull_request(facts: &RepoFacts) -> FixPlan {
     let mut workflows = Vec::new();
     let mut unsupported = Vec::new();
+    let mut inline_flow_workflows = Vec::new();
 
     for workflow_file in &facts.workflows {
         let mut pins = Vec::new();
@@ -911,6 +911,11 @@ fn plan_workflow_pin_pull_request(facts: &RepoFacts) -> FixPlan {
         }
 
         if !pins.is_empty() {
+            if let Some(raw_yaml) = workflow_file.raw_yaml.as_deref()
+                && workflow_pins_have_inline_flow_refs(&pins, raw_yaml)
+            {
+                inline_flow_workflows.push(workflow_file.path.clone());
+            }
             pins.sort_by_key(|left| left.action.to_string());
             workflows.push(WorkflowFilePins {
                 path: workflow_file.path.clone(),
@@ -920,6 +925,16 @@ fn plan_workflow_pin_pull_request(facts: &RepoFacts) -> FixPlan {
     }
 
     workflows.sort_by(|left, right| left.path.cmp(&right.path));
+    inline_flow_workflows.sort();
+
+    if !inline_flow_workflows.is_empty() {
+        return FixPlan::Rejected {
+            reason: format!(
+                "automatic fixes for workflow actions only support block-style YAML; rewrite {} to block style and re-run",
+                summarize_examples(&inline_flow_workflows)
+            ),
+        };
+    }
 
     if !unsupported.is_empty() {
         return FixPlan::Rejected {
@@ -955,6 +970,19 @@ fn record_workflow_action_pin(pins: &mut Vec<WorkflowActionPin>, action: Reposit
             occurrences: 1,
         });
     }
+}
+
+fn workflow_pins_have_inline_flow_refs(pins: &[WorkflowActionPin], raw_yaml: &str) -> bool {
+    // The rewriter calls `replace_uses_line_value` with `pin.action.to_string()`
+    // as the `from` string and expects exactly `pin.occurrences` matches. If a
+    // workflow encodes a step in an inline flow mapping or a quoted-key form,
+    // the regex finds fewer (typically zero) matches than the AST contains.
+    // Detecting that here lets us reject the fix plan with a clear message
+    // before opening an empty PR.
+    pins.iter().any(|pin| {
+        let pattern = crate::workflow::source::block_uses_line_regex(&pin.action.to_string());
+        pattern.captures_iter(raw_yaml).count() < pin.occurrences
+    })
 }
 
 fn repository_action_use_from_reference(uses: &ActionReference) -> Option<RepositoryActionUse> {
@@ -1043,11 +1071,7 @@ fn replace_uses_line_value(
     to: &str,
     tag_comment: Option<&str>,
 ) -> Result<(String, usize, Option<String>), String> {
-    let pattern = Regex::new(&format!(
-        r#"(?m)^([ \t-]*uses:[ \t]*['"]?){}(['"]?)([ \t]*(?:#[^\r\n]*)?)(\r?)$"#,
-        regex::escape(from)
-    ))
-    .map_err(|error| format!("invalid workflow replacement pattern for `{from}`: {error}"))?;
+    let pattern = crate::workflow::source::block_uses_line_regex(from);
 
     let replacements = pattern.captures_iter(text).count();
     let effective_comment = std::cell::Cell::new(None);
@@ -1212,8 +1236,18 @@ mod tests {
     }
 
     fn workflow_with_action(path: &str, uses: ActionReference) -> WorkflowFile {
+        let block_line = format!("      - uses: {}\n", action_reference_text(&uses));
+        workflow_with_action_and_yaml(path, uses, block_line)
+    }
+
+    fn workflow_with_action_and_yaml(
+        path: &str,
+        uses: ActionReference,
+        raw_yaml: String,
+    ) -> WorkflowFile {
         WorkflowFile {
             path: path.to_owned(),
+            raw_yaml: Some(raw_yaml),
             workflow: Workflow {
                 name: Some("CI".to_owned()),
                 triggers: Triggers {
@@ -1392,6 +1426,188 @@ mod tests {
                 reason: "automatic fixes for workflow actions only support literal repository action references: .github/workflows/ci.yml uses ${{ matrix.owner }}/checkout@v4".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn workflow_pin_fix_rejects_inline_flow_yaml_workflows() {
+        let mut facts = base_facts();
+        // AST sees `actions/checkout@v3` but the raw yaml encodes the step as an
+        // inline flow mapping that `replace_uses_line_value` cannot match.
+        facts.workflows.push(workflow_with_action_and_yaml(
+            ".github/workflows/rust.yml",
+            ActionReference::Repository(ActionRef::new("actions", "checkout", "v3")),
+            "on: workflow_dispatch\njobs:\n  build:\n    steps:\n      - { uses: actions/checkout@v3 }\n".to_owned(),
+        ));
+
+        let fixes = plan_repo_fixes(
+            &[Rule::new(
+                "WF002",
+                "Workflow actions are pinned to commit SHAs",
+                RuleKind::WorkflowActionsPinnedToSha,
+            )],
+            &facts,
+        );
+
+        assert_eq!(
+            fixes[0].planned_report().status,
+            FixStatus::Rejected {
+                reason: "automatic fixes for workflow actions only support block-style YAML; rewrite .github/workflows/rust.yml to block style and re-run".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn workflow_pin_fix_rejects_inline_flow_yaml_with_subpath_action() {
+        // Subpath actions like `owner/repo/path@v1` deserialize as
+        // `ActionReference::Other`, but the planner still tries to pin them.
+        // The inline-flow check must include them.
+        let mut facts = base_facts();
+        facts.workflows.push(workflow_with_action_and_yaml(
+            ".github/workflows/rust.yml",
+            ActionReference::Other("docker/build-push-action/sub@v5".to_owned()),
+            "on: workflow_dispatch\njobs:\n  build:\n    steps:\n      - { uses: docker/build-push-action/sub@v5 }\n".to_owned(),
+        ));
+
+        let fixes = plan_repo_fixes(
+            &[Rule::new(
+                "WF002",
+                "Workflow actions are pinned to commit SHAs",
+                RuleKind::WorkflowActionsPinnedToSha,
+            )],
+            &facts,
+        );
+
+        assert_eq!(
+            fixes[0].planned_report().status,
+            FixStatus::Rejected {
+                reason: "automatic fixes for workflow actions only support block-style YAML; rewrite .github/workflows/rust.yml to block style and re-run".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn workflow_pin_fix_plans_when_raw_yaml_is_unavailable() {
+        // Legacy snapshots predate the raw_yaml field. The planner cannot tell
+        // whether the source is inline-flow, so it trusts the AST and plans
+        // the fix — the rewriter will error at apply time if the source turns
+        // out to be inline-flow.
+        let mut facts = base_facts();
+        let mut workflow = workflow_with_action(
+            ".github/workflows/rust.yml",
+            ActionReference::Repository(ActionRef::new("actions", "checkout", "v3")),
+        );
+        workflow.raw_yaml = None;
+        facts.workflows.push(workflow);
+
+        let fixes = plan_repo_fixes(
+            &[Rule::new(
+                "WF002",
+                "Workflow actions are pinned to commit SHAs",
+                RuleKind::WorkflowActionsPinnedToSha,
+            )],
+            &facts,
+        );
+
+        assert!(matches!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::OpenWorkflowPinPullRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn workflow_pin_fix_with_inline_flow_uses_not_first() {
+        // Inline flow step where `uses` is not the first key.
+        let mut facts = base_facts();
+        facts.workflows.push(workflow_with_action_and_yaml(
+            ".github/workflows/rust.yml",
+            ActionReference::Repository(ActionRef::new("actions", "checkout", "v3")),
+            "on: workflow_dispatch\njobs:\n  build:\n    steps:\n      - { name: Checkout, uses: actions/checkout@v3 }\n".to_owned(),
+        ));
+
+        let fixes = plan_repo_fixes(
+            &[Rule::new(
+                "WF002",
+                "Workflow actions are pinned to commit SHAs",
+                RuleKind::WorkflowActionsPinnedToSha,
+            )],
+            &facts,
+        );
+
+        assert!(matches!(fixes[0].planned_report().status, FixStatus::Rejected { .. }));
+    }
+
+    fn checkout_pin() -> WorkflowActionPin {
+        WorkflowActionPin {
+            action: RepositoryActionUse {
+                repo: RepoRef::new("actions", "checkout"),
+                subpath: None,
+                version: "v3".to_owned(),
+            },
+            occurrences: 1,
+        }
+    }
+
+    #[test]
+    fn workflow_pins_have_inline_flow_refs_false_for_block_yaml() {
+        let yaml = "      - uses: actions/checkout@v3\n";
+        assert!(!workflow_pins_have_inline_flow_refs(&[checkout_pin()], yaml));
+    }
+
+    #[test]
+    fn workflow_pins_have_inline_flow_refs_true_for_inline_mapping() {
+        let yaml = "      - { uses: actions/checkout@v3 }\n";
+        assert!(workflow_pins_have_inline_flow_refs(&[checkout_pin()], yaml));
+    }
+
+    #[test]
+    fn workflow_pins_have_inline_flow_refs_true_for_quoted_key() {
+        let yaml = "      - \"uses\": \"actions/checkout@v3\"\n";
+        assert!(workflow_pins_have_inline_flow_refs(&[checkout_pin()], yaml));
+    }
+
+    #[test]
+    fn workflow_pins_have_inline_flow_refs_false_when_block_match_appears_in_comment_too() {
+        // Trailing comment text containing `"uses":` must not confuse the
+        // regex; the line still matches the block-style pattern.
+        let yaml = "      - uses: actions/checkout@v3 # was { \"uses\": \"v2\" }\n";
+        assert!(!workflow_pins_have_inline_flow_refs(&[checkout_pin()], yaml));
+    }
+
+    #[test]
+    fn workflow_pins_have_inline_flow_refs_ignores_block_scalar_substring() {
+        // A `run:` block scalar may contain literal `"uses":` text. There is no
+        // block-style `actions/checkout@v3` line, so the check trips.
+        let yaml = "      - run: |\n          echo '{\"uses\": \"actions/checkout@v3\"}'\n";
+        assert!(workflow_pins_have_inline_flow_refs(&[checkout_pin()], yaml));
+    }
+
+    #[test]
+    fn workflow_pins_have_inline_flow_refs_under_counted_when_one_form_each() {
+        // Expected 2 occurrences but only one block-style line exists.
+        let yaml = "      - uses: actions/checkout@v3\n      - { uses: actions/checkout@v3 }\n";
+        let pin = WorkflowActionPin {
+            action: RepositoryActionUse {
+                repo: RepoRef::new("actions", "checkout"),
+                subpath: None,
+                version: "v3".to_owned(),
+            },
+            occurrences: 2,
+        };
+        assert!(workflow_pins_have_inline_flow_refs(&[pin], yaml));
+    }
+
+    #[test]
+    fn workflow_pins_have_inline_flow_refs_true_for_subpath_inline_flow() {
+        let yaml = "      - { uses: docker/build-push-action/sub@v5 }\n";
+        let pin = WorkflowActionPin {
+            action: RepositoryActionUse {
+                repo: RepoRef::new("docker", "build-push-action"),
+                subpath: Some("sub".to_owned()),
+                version: "v5".to_owned(),
+            },
+            occurrences: 1,
+        };
+        assert!(workflow_pins_have_inline_flow_refs(&[pin], yaml));
     }
 
     #[test]

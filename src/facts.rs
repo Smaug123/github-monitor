@@ -51,6 +51,14 @@ impl RepoSettings {
 pub struct WorkflowFile {
     pub path: String,
     pub workflow: Workflow,
+    /// The raw source of the workflow file. The workflow-pin rewriter operates
+    /// on this text and needs it to verify whether each `uses:` it would change
+    /// is actually findable via its block-style regex; storing it lets the
+    /// planner reject inline-flow YAML before the rewrite runs. `None` means
+    /// the source is unavailable (e.g. legacy snapshot) and the planner falls
+    /// back to trusting the AST.
+    #[serde(default)]
+    pub raw_yaml: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,10 +200,10 @@ fn fetch_workflows(
             path: file.path.clone(),
             source,
         })?;
-
         workflows.push(WorkflowFile {
             path: file.path,
             workflow,
+            raw_yaml: Some(yaml),
         });
     }
 
@@ -721,10 +729,16 @@ mod tests {
     }
 
     fn workflow_file_strategy() -> impl Strategy<Value = WorkflowFile> {
-        (identifier(), workflow_strategy()).prop_map(|(name, workflow)| WorkflowFile {
-            path: format!(".github/workflows/{name}.yml"),
-            workflow,
-        })
+        (
+            identifier(),
+            workflow_strategy(),
+            proptest::option::of(any::<String>()),
+        )
+            .prop_map(|(name, workflow, raw_yaml)| WorkflowFile {
+                path: format!(".github/workflows/{name}.yml"),
+                workflow,
+                raw_yaml,
+            })
     }
 
     fn repo_facts_strategy() -> impl Strategy<Value = RepoFacts> {
@@ -840,6 +854,7 @@ mod tests {
             default_branch: BranchName::new("main"),
             workflows: vec![WorkflowFile {
                 path: ".github/workflows/ci.yml".to_owned(),
+                raw_yaml: None,
                 workflow: Workflow {
                     name: Some("CI".to_owned()),
                     triggers: Triggers {
