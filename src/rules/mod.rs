@@ -35,6 +35,8 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
         RuleKind::FileExists { .. } | RuleKind::NixFlakeExists | RuleKind::NixFlakeHasCheck => {
             files::evaluate(kind, facts)
         }
-        RuleKind::RepoSettingMatch { .. } => settings::evaluate(kind, facts),
+        RuleKind::RepoSettingMatch { .. } | RuleKind::DefaultBranchNameIs { .. } => {
+            settings::evaluate(kind, facts)
+        }
     }
 }

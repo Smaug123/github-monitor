@@ -407,6 +407,7 @@ fn rule_kind_strategy() -> impl Strategy<Value = RuleKind> {
         Just(RuleKind::NixFlakeHasCheck),
         (repo_setting_strategy(), setting_value_strategy())
             .prop_map(|(setting, expected)| RuleKind::RepoSettingMatch { setting, expected }),
+        identifier().prop_map(|name| RuleKind::DefaultBranchNameIs { name }),
     ]
 }
 
@@ -966,6 +967,42 @@ fn repo_setting_match_reads_boolean_settings() {
 }
 
 #[test]
+fn default_branch_name_is_passes_when_branch_matches() {
+    let mut facts = base_facts();
+    facts.default_branch = BranchName::new("main");
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::DefaultBranchNameIs {
+                name: "main".to_owned(),
+            },
+            &facts,
+        ),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn default_branch_name_is_fails_when_branch_differs() {
+    let mut facts = base_facts();
+    facts.default_branch = BranchName::new("master");
+
+    let result = evaluate(
+        &RuleKind::DefaultBranchNameIs {
+            name: "main".to_owned(),
+        },
+        &facts,
+    );
+    let RuleResult::Fail { reason } = result else {
+        panic!("expected Fail, got {result:?}");
+    };
+    assert!(
+        reason.contains("`master`") && reason.contains("`main`"),
+        "unexpected reason: {reason}"
+    );
+}
+
+#[test]
 fn nix_flake_has_check_passes_when_workflow_runs_nix_flake_check() {
     let mut facts = base_facts();
     facts.files_present.insert("flake.nix".to_owned());
@@ -1185,6 +1222,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("ST005".to_owned(), "pass"),
         ("ST006".to_owned(), "pass"),
         ("ST007".to_owned(), "pass"),
+        ("ST008".to_owned(), "pass"),
         ("WF001".to_owned(), "pass"),
         ("WF002".to_owned(), "pass"),
         ("WF003".to_owned(), "pass"),
@@ -1218,6 +1256,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("ST005".to_owned(), "pass"),
         ("ST006".to_owned(), "fail"),
         ("ST007".to_owned(), "fail"),
+        ("ST008".to_owned(), "pass"),
         ("WF001".to_owned(), "fail"),
         ("WF002".to_owned(), "fail"),
         ("WF003".to_owned(), "fail"),

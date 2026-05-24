@@ -116,6 +116,9 @@ pub enum RuleKind {
         setting: RepoSetting,
         expected: SettingValue,
     },
+    DefaultBranchNameIs {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

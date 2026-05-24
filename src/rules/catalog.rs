@@ -116,5 +116,12 @@ pub fn default_rules() -> Vec<Rule> {
                 )),
             },
         ),
+        Rule::new(
+            "ST008",
+            "Default branch is named `main`",
+            RuleKind::DefaultBranchNameIs {
+                name: "main".to_owned(),
+            },
+        ),
     ]
 }
