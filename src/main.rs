@@ -15,6 +15,8 @@ use crate::config::{Config, ConfigError};
 use crate::facts::{
     FactsError, RepoFacts, SnapshotError, gather_repo_facts, load_snapshot, save_snapshot,
 };
+use crate::github::app_auth::{AppAuthError, GitHubAppCredentials};
+use crate::github::auth::GitHubAuth;
 use crate::github::client::{GitHubClient, GitHubToken};
 use crate::loki::{DEFAULT_JOB_LABEL, LokiPushError};
 use crate::remediation::{PlannedFix, RepoFix, execute_repo_fixes, plan_repo_fixes};
@@ -23,9 +25,34 @@ use crate::rules::{default_rules, evaluate_rules};
 use crate::types::RepoRef;
 
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
+const GITHUB_APP_ID_ENV: &str = "GITHUB_APP_ID";
+const GITHUB_APP_PRIVATE_KEY_PATH_ENV: &str = "GITHUB_APP_PRIVATE_KEY_PATH";
 
-fn github_token_from_env() -> Option<GitHubToken> {
-    GitHubToken::from_env(GITHUB_TOKEN_ENV)
+fn github_auth_from_env() -> Result<GitHubAuth, AppError> {
+    let app_id = std::env::var(GITHUB_APP_ID_ENV).ok();
+    let key_path = std::env::var(GITHUB_APP_PRIVATE_KEY_PATH_ENV).ok();
+
+    match (app_id, key_path) {
+        (Some(app_id), Some(key_path)) => {
+            let app_id: u64 = app_id
+                .parse()
+                .map_err(|_| AppError::InvalidGitHubAppId { value: app_id })?;
+            let pem =
+                std::fs::read(&key_path).map_err(|source| AppError::ReadGitHubAppPrivateKey {
+                    path: key_path.clone(),
+                    source,
+                })?;
+            let credentials = GitHubAppCredentials::from_pem(app_id, &pem)
+                .map_err(|source| AppError::InvalidGitHubAppPrivateKey { source })?;
+            Ok(GitHubAuth::app(credentials))
+        }
+        (Some(_), None) | (None, Some(_)) => Err(AppError::IncompleteGitHubAppCredentials),
+        (None, None) => {
+            let token = GitHubToken::from_env(GITHUB_TOKEN_ENV)
+                .ok_or(AppError::MissingGitHubCredentials)?;
+            Ok(GitHubAuth::token(token))
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -95,10 +122,8 @@ fn load_facts(config: &Config, snapshot_mode: &SnapshotMode) -> Result<Vec<RepoF
 }
 
 fn gather_facts_from_github(repos: &[RepoRef]) -> Result<Vec<RepoFacts>, AppError> {
-    let token = github_token_from_env().ok_or(AppError::MissingGitHubToken {
-        env_var: GITHUB_TOKEN_ENV,
-    })?;
-    let mut client = GitHubClient::new(token);
+    let auth = github_auth_from_env()?;
+    let mut client = GitHubClient::with_auth(auth);
     gather_facts_from_github_with_client(&mut client, repos)
 }
 
@@ -125,10 +150,8 @@ fn execute_fix_run(
     snapshot_mode: &SnapshotMode,
 ) -> Result<Vec<RepoReport>, AppError> {
     let repos = config.repo_refs();
-    let token = github_token_from_env().ok_or(AppError::MissingGitHubToken {
-        env_var: GITHUB_TOKEN_ENV,
-    })?;
-    let mut client = GitHubClient::new(token);
+    let auth = github_auth_from_env()?;
+    let mut client = GitHubClient::with_auth(auth);
     let initial_facts = gather_facts_from_github_with_client(&mut client, &repos)?;
     let planned_fixes = plan_repo_fix_batches(&initial_facts);
 
@@ -332,8 +355,17 @@ impl std::error::Error for CliError {
 #[derive(Debug)]
 enum AppError {
     Config(Box<ConfigError>),
-    MissingGitHubToken {
-        env_var: &'static str,
+    MissingGitHubCredentials,
+    IncompleteGitHubAppCredentials,
+    InvalidGitHubAppId {
+        value: String,
+    },
+    ReadGitHubAppPrivateKey {
+        path: String,
+        source: std::io::Error,
+    },
+    InvalidGitHubAppPrivateKey {
+        source: AppAuthError,
     },
     Facts {
         repo: RepoRef,
@@ -371,11 +403,32 @@ impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Config(source) => source.fmt(f),
-            Self::MissingGitHubToken { env_var } => {
+            Self::MissingGitHubCredentials => {
                 write!(
                     f,
-                    "missing {env_var}; it is required unless --snapshot-load is used"
+                    "missing GitHub credentials; set {GITHUB_TOKEN_ENV}, or both {GITHUB_APP_ID_ENV} and {GITHUB_APP_PRIVATE_KEY_PATH_ENV}, unless --snapshot-load is used"
                 )
+            }
+            Self::IncompleteGitHubAppCredentials => {
+                write!(
+                    f,
+                    "incomplete GitHub App credentials; both {GITHUB_APP_ID_ENV} and {GITHUB_APP_PRIVATE_KEY_PATH_ENV} must be set together"
+                )
+            }
+            Self::InvalidGitHubAppId { value } => {
+                write!(
+                    f,
+                    "{GITHUB_APP_ID_ENV}={value:?} is not a valid GitHub App ID"
+                )
+            }
+            Self::ReadGitHubAppPrivateKey { path, source } => {
+                write!(
+                    f,
+                    "failed to read GitHub App private key from {path}: {source}"
+                )
+            }
+            Self::InvalidGitHubAppPrivateKey { source } => {
+                write!(f, "invalid GitHub App private key: {source}")
             }
             Self::Facts { repo, source } => {
                 write!(f, "failed to gather facts for {repo}: {source}")
@@ -392,7 +445,11 @@ impl std::error::Error for AppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Config(source) => Some(source),
-            Self::MissingGitHubToken { .. } => None,
+            Self::MissingGitHubCredentials
+            | Self::IncompleteGitHubAppCredentials
+            | Self::InvalidGitHubAppId { .. } => None,
+            Self::ReadGitHubAppPrivateKey { source, .. } => Some(source),
+            Self::InvalidGitHubAppPrivateKey { source } => Some(source),
             Self::Facts { source, .. } => Some(source),
             Self::Snapshot(source) => Some(source),
             Self::Report(source) => Some(source),

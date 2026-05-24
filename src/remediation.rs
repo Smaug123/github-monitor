@@ -592,7 +592,7 @@ fn create_workflow_pin_pull_request(
 ) -> Result<PullRequest, String> {
     let branch_name = workflow_pin_branch_name();
     let base_sha = client
-        .resolve_commit_sha(&plan.repo, &plan.default_branch.to_string())
+        .resolve_commit_sha(&plan.repo, &plan.repo, &plan.default_branch.to_string())
         .map_err(|error| {
             format!(
                 "failed to resolve base branch `{}` for `{}`: {error}",
@@ -668,7 +668,7 @@ fn create_workflow_pin_pull_request(
                 GitHubClientError::UnexpectedStatus { .. } => Err(
                     cleanup_failed_workflow_pin_branch(client, plan, &branch_name, failure),
                 ),
-                GitHubClientError::Request { .. } => Err(failure),
+                GitHubClientError::Request { .. } | GitHubClientError::Auth { .. } => Err(failure),
                 GitHubClientError::UnexpectedContentsShape { .. } => {
                     unreachable!("pull request creation does not use repository contents endpoints")
                 }
@@ -710,7 +710,7 @@ fn prepare_workflow_updates(
                     existing.clone()
                 } else {
                     let resolved = client
-                        .resolve_commit_sha(&pin.action.repo, &pin.action.version)
+                        .resolve_commit_sha(&plan.repo, &pin.action.repo, &pin.action.version)
                         .map_err(|error| {
                             format!(
                                 "failed to resolve `{}` to a commit SHA: {error}",

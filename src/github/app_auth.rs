@@ -1,7 +1,4 @@
-#![allow(dead_code)]
-
 use std::fmt;
-use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -13,7 +10,7 @@ use crate::types::RepoRef;
 
 const JWT_BACKDATE_SECONDS: u64 = 60;
 const JWT_LIFETIME_SECONDS: u64 = 9 * 60;
-const INSTALLATION_TOKEN_RENEW_MARGIN_SECONDS: u64 = 5 * 60;
+pub(crate) const INSTALLATION_TOKEN_RENEW_MARGIN_SECONDS: u64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstallationId(pub u64);
@@ -39,18 +36,6 @@ impl GitHubAppCredentials {
             app_id,
             encoding_key,
         })
-    }
-
-    pub fn from_pem_file(app_id: u64, path: &Path) -> Result<Self, AppAuthError> {
-        let pem = std::fs::read(path).map_err(|source| AppAuthError::ReadPrivateKey {
-            path: path.display().to_string(),
-            source: source.to_string(),
-        })?;
-        Self::from_pem(app_id, &pem)
-    }
-
-    pub fn app_id(&self) -> u64 {
-        self.app_id
     }
 }
 
@@ -303,10 +288,6 @@ pub enum AppAuthError {
     InvalidPrivateKey {
         source: String,
     },
-    ReadPrivateKey {
-        path: String,
-        source: String,
-    },
     Jwt {
         source: String,
     },
@@ -330,9 +311,6 @@ impl fmt::Display for AppAuthError {
         match self {
             Self::InvalidPrivateKey { source } => {
                 write!(f, "failed to parse GitHub App private key: {source}")
-            }
-            Self::ReadPrivateKey { path, source } => {
-                write!(f, "failed to read GitHub App private key from {path}: {source}")
             }
             Self::Jwt { source } => write!(f, "failed to mint GitHub App JWT: {source}"),
             Self::Request { url, source } => write!(f, "request to {url} failed: {source}"),
@@ -479,8 +457,7 @@ HwIDAQAB\n\
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         let token = InstallationToken {
             token: "ghs_abc".to_owned(),
-            expires_at: now
-                + Duration::from_secs(INSTALLATION_TOKEN_RENEW_MARGIN_SECONDS + 1),
+            expires_at: now + Duration::from_secs(INSTALLATION_TOKEN_RENEW_MARGIN_SECONDS + 1),
         };
 
         assert!(!token.needs_refresh(now));
@@ -532,9 +509,8 @@ HwIDAQAB\n\
         )]);
         let agent: Agent = Agent::config_builder().build().into();
 
-        let error =
-            fetch_installation_token(&agent, &server.base_url(), "jwt", InstallationId(1))
-                .unwrap_err();
+        let error = fetch_installation_token(&agent, &server.base_url(), "jwt", InstallationId(1))
+            .unwrap_err();
 
         match error {
             AppAuthError::MalformedExpiresAt { value } => assert_eq!(value, "not a date"),
@@ -554,9 +530,8 @@ HwIDAQAB\n\
         // override inside fetch_installation_token routes 4xx through UnexpectedStatus.
         let agent: Agent = Agent::config_builder().build().into();
 
-        let error =
-            fetch_installation_token(&agent, &server.base_url(), "x", InstallationId(9))
-                .unwrap_err();
+        let error = fetch_installation_token(&agent, &server.base_url(), "x", InstallationId(9))
+            .unwrap_err();
 
         match error {
             AppAuthError::UnexpectedStatus { status, body, .. } => {
@@ -589,16 +564,16 @@ HwIDAQAB\n\
         let bad = [
             "",
             "2024-01-01",
-            "2024-01-01T00:00:00",         // no Z
-            "2024-01-01T00:00:00+00:00",   // offset
-            "2024-1-01T00:00:00Z",         // single-digit month
-            "2024-02-30T00:00:00Z",        // not a real day
-            "2023-02-29T00:00:00Z",        // not a leap year
-            "2024-13-01T00:00:00Z",        // month 13
-            "2024-01-01T24:00:00Z",        // hour 24
-            "2024-01-01T00:60:00Z",        // minute 60
-            "2024-01-01T00:00:60Z",        // second 60
-            "2024-01-01T00:00:00z",        // lowercase z
+            "2024-01-01T00:00:00",       // no Z
+            "2024-01-01T00:00:00+00:00", // offset
+            "2024-1-01T00:00:00Z",       // single-digit month
+            "2024-02-30T00:00:00Z",      // not a real day
+            "2023-02-29T00:00:00Z",      // not a leap year
+            "2024-13-01T00:00:00Z",      // month 13
+            "2024-01-01T24:00:00Z",      // hour 24
+            "2024-01-01T00:60:00Z",      // minute 60
+            "2024-01-01T00:00:60Z",      // second 60
+            "2024-01-01T00:00:00z",      // lowercase z
         ];
         for input in bad {
             assert_eq!(
