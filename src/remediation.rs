@@ -630,7 +630,7 @@ fn plan_workflow_pin_pull_request(facts: &RepoFacts) -> FixPlan {
         }
 
         if !pins.is_empty() {
-            pins.sort_by(|left, right| left.action.to_string().cmp(&right.action.to_string()));
+            pins.sort_by_key(|left| left.action.to_string());
             workflows.push(WorkflowFilePins {
                 path: workflow_file.path.clone(),
                 pins,

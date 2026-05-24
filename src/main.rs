@@ -1,6 +1,7 @@
 mod config;
 mod facts;
 mod github;
+mod loki;
 mod remediation;
 mod report;
 mod rules;
@@ -15,6 +16,7 @@ use crate::facts::{
     FactsError, RepoFacts, SnapshotError, gather_repo_facts, load_snapshot, save_snapshot,
 };
 use crate::github::client::{GitHubClient, GitHubToken};
+use crate::loki::{DEFAULT_JOB_LABEL, LokiPushError};
 use crate::remediation::{PlannedFix, RepoFix, execute_repo_fixes, plan_repo_fixes};
 use crate::report::{OutputFormat, OutputFormatError, RepoReport, ReportError};
 use crate::rules::{default_rules, evaluate_rules};
@@ -52,7 +54,23 @@ fn run(args: CliArgs) -> Result<RunOutput, AppError> {
         }
         ExecutionMode::Execute => execute_fix_run(&config, &args.snapshot_mode)?,
     };
-    let rendered = report::render(args.format, &reports)?;
+
+    let loki_payload = if args.format == OutputFormat::Loki || args.loki_push_url.is_some() {
+        let now_ns = loki::current_time_ns().map_err(|source| AppError::Clock { source })?;
+        Some(loki::build_payload(&reports, &args.loki_job, now_ns))
+    } else {
+        None
+    };
+
+    if let (Some(url), Some(payload)) = (&args.loki_push_url, loki_payload.as_ref()) {
+        let agent = loki::build_push_agent();
+        loki::push(&agent, url, payload).map_err(|source| AppError::LokiPush { source })?;
+    }
+
+    let rendered = match args.format {
+        OutputFormat::Text | OutputFormat::Json => report::render(args.format, &reports)?,
+        OutputFormat::Loki => loki::render(loki_payload.as_ref().expect("computed above")),
+    };
 
     Ok(RunOutput { reports, rendered })
 }
@@ -184,6 +202,8 @@ struct CliArgs {
     snapshot_mode: SnapshotMode,
     format: OutputFormat,
     execution_mode: ExecutionMode,
+    loki_job: String,
+    loki_push_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +230,8 @@ where
     let mut snapshot_load = None;
     let mut format = OutputFormat::Text;
     let mut execution_mode = ExecutionMode::Plan;
+    let mut loki_job = DEFAULT_JOB_LABEL.to_owned();
+    let mut loki_push_url: Option<String> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -227,6 +249,12 @@ where
                 format = OutputFormat::parse(&raw).map_err(CliError::InvalidFormat)?;
             }
             "--fix" => execution_mode = ExecutionMode::Execute,
+            "--loki-job" => {
+                loki_job = next_arg_value(&mut args, "--loki-job")?;
+            }
+            "--push-loki" => {
+                loki_push_url = Some(next_arg_value(&mut args, "--push-loki")?);
+            }
             other => return Err(CliError::UnknownArgument(other.to_owned())),
         }
     }
@@ -249,6 +277,8 @@ where
         snapshot_mode,
         format,
         execution_mode,
+        loki_job,
+        loki_push_url,
     })
 }
 
@@ -311,6 +341,12 @@ enum AppError {
     },
     Snapshot(Box<SnapshotError>),
     Report(Box<ReportError>),
+    LokiPush {
+        source: LokiPushError,
+    },
+    Clock {
+        source: std::time::SystemTimeError,
+    },
 }
 
 impl From<ConfigError> for AppError {
@@ -346,6 +382,8 @@ impl std::fmt::Display for AppError {
             }
             Self::Snapshot(source) => source.fmt(f),
             Self::Report(source) => source.fmt(f),
+            Self::LokiPush { source } => source.fmt(f),
+            Self::Clock { source } => write!(f, "failed to read system clock: {source}"),
         }
     }
 }
@@ -358,6 +396,8 @@ impl std::error::Error for AppError {
             Self::Facts { source, .. } => Some(source),
             Self::Snapshot(source) => Some(source),
             Self::Report(source) => Some(source),
+            Self::LokiPush { source } => Some(source),
+            Self::Clock { source } => Some(source),
         }
     }
 }
@@ -409,6 +449,17 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
     }
 
+    fn cli_defaults() -> CliArgs {
+        CliArgs {
+            config_path: PathBuf::new(),
+            snapshot_mode: SnapshotMode::None,
+            format: OutputFormat::Text,
+            execution_mode: ExecutionMode::Plan,
+            loki_job: DEFAULT_JOB_LABEL.to_owned(),
+            loki_push_url: None,
+        }
+    }
+
     #[test]
     fn parses_snapshot_load_cli_flags() {
         let args = parse_cli_args([
@@ -424,8 +475,7 @@ mod tests {
             CliArgs {
                 config_path: PathBuf::from("tests/fixtures/repos.toml"),
                 snapshot_mode: SnapshotMode::Load(PathBuf::from("tests/fixtures")),
-                format: OutputFormat::Text,
-                execution_mode: ExecutionMode::Plan,
+                ..cli_defaults()
             }
         );
     }
@@ -448,7 +498,7 @@ mod tests {
                 config_path: PathBuf::from("tests/fixtures/repos.toml"),
                 snapshot_mode: SnapshotMode::Load(PathBuf::from("tests/fixtures")),
                 format: OutputFormat::Json,
-                execution_mode: ExecutionMode::Plan,
+                ..cli_defaults()
             }
         );
     }
@@ -461,9 +511,8 @@ mod tests {
             args,
             CliArgs {
                 config_path: PathBuf::from("tests/fixtures/repos.toml"),
-                snapshot_mode: SnapshotMode::None,
-                format: OutputFormat::Text,
                 execution_mode: ExecutionMode::Execute,
+                ..cli_defaults()
             }
         );
     }
@@ -500,8 +549,7 @@ mod tests {
         let output = run(CliArgs {
             config_path: fixture_path("tests/fixtures/good-repo.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
-            format: OutputFormat::Text,
-            execution_mode: ExecutionMode::Plan,
+            ..cli_defaults()
         })
         .unwrap();
 
@@ -520,8 +568,7 @@ mod tests {
         let output = run(CliArgs {
             config_path: fixture_path("tests/fixtures/repos.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
-            format: OutputFormat::Text,
-            execution_mode: ExecutionMode::Plan,
+            ..cli_defaults()
         })
         .unwrap();
 
@@ -536,7 +583,7 @@ mod tests {
             config_path: fixture_path("tests/fixtures/repos.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
             format: OutputFormat::Json,
-            execution_mode: ExecutionMode::Plan,
+            ..cli_defaults()
         })
         .unwrap();
 
@@ -560,7 +607,7 @@ mod tests {
             config_path: fixture_path("tests/fixtures/good-repo.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
             format: OutputFormat::Json,
-            execution_mode: ExecutionMode::Plan,
+            ..cli_defaults()
         })
         .unwrap();
 
@@ -589,12 +636,41 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_run_renders_loki_payload() {
+        let output = run(CliArgs {
+            config_path: fixture_path("tests/fixtures/repos.toml"),
+            snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
+            format: OutputFormat::Loki,
+            ..cli_defaults()
+        })
+        .unwrap();
+
+        let raw: serde_json::Value = serde_json::from_str(output.rendered.trim()).unwrap();
+        let streams = raw["streams"].as_array().expect("streams should be array");
+        assert!(!streams.is_empty(), "expected at least one stream");
+        for stream in streams {
+            let labels = stream["stream"].as_object().expect("stream labels");
+            assert_eq!(labels["job"].as_str(), Some("github-infra"));
+            assert!(labels.contains_key("repo"));
+            let values = stream["values"].as_array().expect("values should be array");
+            for value in values {
+                let pair = value.as_array().expect("value pair");
+                assert_eq!(pair.len(), 2);
+                assert!(pair[0].as_str().unwrap().parse::<u128>().is_ok());
+                let line: serde_json::Value =
+                    serde_json::from_str(pair[1].as_str().unwrap()).unwrap();
+                assert!(line.get("rule_id").is_some());
+                assert!(line.get("status").is_some());
+            }
+        }
+    }
+
+    #[test]
     fn snapshot_plan_run_lists_planned_fixes_for_fixable_failures() {
         let output = run(CliArgs {
             config_path: fixture_path("tests/fixtures/repos.toml"),
             snapshot_mode: SnapshotMode::Load(fixture_path("tests/fixtures")),
-            format: OutputFormat::Text,
-            execution_mode: ExecutionMode::Plan,
+            ..cli_defaults()
         })
         .unwrap();
 

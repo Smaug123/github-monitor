@@ -1,0 +1,300 @@
+{
+  "title": "GitHub Infra Compliance",
+  "uid": "github-infra-compliance",
+  "schemaVersion": 39,
+  "version": 2,
+  "tags": ["github-infra"],
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "5m",
+  "timezone": "",
+  "editable": true,
+  "graphTooltip": 0,
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "loki",
+        "label": "Loki source",
+        "current": {},
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false
+      },
+      {
+        "name": "job",
+        "type": "constant",
+        "label": "Job",
+        "current": { "text": "github-infra", "value": "github-infra" },
+        "query": "github-infra",
+        "hide": 2,
+        "skipUrlSync": false
+      },
+      {
+        "name": "repo",
+        "type": "query",
+        "label": "Repo",
+        "datasource": { "type": "loki", "uid": "${datasource}" },
+        "query": "label_values({job=\"$job\"}, repo)",
+        "definition": "label_values({job=\"$job\"}, repo)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Failing outcomes",
+      "description": "Count of fail/error log lines across selected repos in the dashboard time range.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum(count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=~\"fail|error\" [$__range]))",
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Passing outcomes",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum(count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=\"pass\" [$__range]))",
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "green" },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background"
+      }
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "Failures by rule",
+      "description": "Failing rule outcomes grouped by rule id, across selected repos in the dashboard time range.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum by (rule_id) (count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=~\"fail|error\" [$__range]))",
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "always",
+        "xTickLabelRotation": 0
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Failures by repo (selected range)",
+      "description": "Per-repo count of fail/error outcomes.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "sum by (repo) (count_over_time({job=\"$job\", repo=~\"$repo\"} | json | status=~\"fail|error\" [$__range]))",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "renameByName": { "Value": "failures" }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [{ "field": "failures", "desc": true }]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "cellOptions": { "type": "auto" } },
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "failures" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          }
+        ]
+      },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Raw log stream (debug)",
+      "description": "Most recent log lines reaching Loki. If this is empty, no data is arriving — check --push-loki URL and time range.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=\"$job\"}",
+          "queryType": "range",
+          "maxLines": 50
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none"
+      },
+      "collapsed": true
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "$repo",
+      "description": "Latest rule outcome per rule_id for $repo.",
+      "datasource": { "type": "loki", "uid": "${datasource}" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 18 },
+      "repeat": "repo",
+      "repeatDirection": "v",
+      "maxPerRow": 1,
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${datasource}" },
+          "expr": "{job=\"$job\", repo=~\"$repo\"} | json",
+          "queryType": "range",
+          "maxLines": 5000
+        }
+      ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": { "source": "Line", "format": "json", "keepTime": false, "replace": false }
+        },
+        {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "rule_id": { "aggregations": [], "operation": "groupby" },
+              "status": { "aggregations": ["lastNotNull"], "operation": "aggregate" },
+              "name": { "aggregations": ["lastNotNull"], "operation": "aggregate" },
+              "reason": { "aggregations": ["lastNotNull"], "operation": "aggregate" },
+              "Time": { "aggregations": ["lastNotNull"], "operation": "aggregate" }
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "status (lastNotNull)": "status",
+              "name (lastNotNull)": "rule name",
+              "reason (lastNotNull)": "reason",
+              "Time (lastNotNull)": "last seen"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [{ "field": "rule_id", "desc": false }]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "left", "cellOptions": { "type": "auto" } },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "status" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "pass": { "color": "green", "index": 0 } } },
+                  { "type": "value", "options": { "fail": { "color": "red", "index": 1 } } },
+                  { "type": "value", "options": { "error": { "color": "red", "index": 2 } } },
+                  { "type": "value", "options": { "skip": { "color": "blue", "index": 3 } } }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "status", "desc": true }]
+      }
+    }
+  ]
+}

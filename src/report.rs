@@ -8,6 +8,7 @@ use crate::types::RepoRef;
 pub enum OutputFormat {
     Text,
     Json,
+    Loki,
 }
 
 impl OutputFormat {
@@ -15,6 +16,7 @@ impl OutputFormat {
         match raw {
             "text" => Ok(Self::Text),
             "json" => Ok(Self::Json),
+            "loki" => Ok(Self::Loki),
             _ => Err(OutputFormatError {
                 value: raw.to_owned(),
             }),
@@ -31,7 +33,7 @@ impl std::fmt::Display for OutputFormatError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "invalid output format `{}`; expected `text` or `json`",
+            "invalid output format `{}`; expected `text`, `json`, or `loki`",
             self.value
         )
     }
@@ -84,6 +86,7 @@ pub fn render(format: OutputFormat, reports: &[RepoReport]) -> Result<String, Re
     match format {
         OutputFormat::Text => Ok(render_text(reports)),
         OutputFormat::Json => render_json(reports),
+        OutputFormat::Loki => Err(ReportError::LokiRequiresDedicatedRenderer),
     }
 }
 
@@ -221,6 +224,7 @@ fn fix_status_reason(status: &FixStatus) -> Option<&str> {
 #[derive(Debug)]
 pub enum ReportError {
     JsonSerialize { source: serde_json::Error },
+    LokiRequiresDedicatedRenderer,
 }
 
 impl std::fmt::Display for ReportError {
@@ -229,6 +233,9 @@ impl std::fmt::Display for ReportError {
             Self::JsonSerialize { source } => {
                 write!(f, "failed to serialize JSON report: {source}")
             }
+            Self::LokiRequiresDedicatedRenderer => f.write_str(
+                "Loki output should be produced via the loki module, not report::render",
+            ),
         }
     }
 }
@@ -237,6 +244,7 @@ impl std::error::Error for ReportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::JsonSerialize { source } => Some(source),
+            Self::LokiRequiresDedicatedRenderer => None,
         }
     }
 }
@@ -310,9 +318,10 @@ mod tests {
     fn parses_output_formats() {
         assert_eq!(OutputFormat::parse("text").unwrap(), OutputFormat::Text);
         assert_eq!(OutputFormat::parse("json").unwrap(), OutputFormat::Json);
+        assert_eq!(OutputFormat::parse("loki").unwrap(), OutputFormat::Loki);
         assert_eq!(
             OutputFormat::parse("yaml").unwrap_err().to_string(),
-            "invalid output format `yaml`; expected `text` or `json`"
+            "invalid output format `yaml`; expected `text`, `json`, or `loki`"
         );
     }
 

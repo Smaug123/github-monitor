@@ -54,7 +54,9 @@ There is no built-in `--help` flag yet. These are the supported arguments:
 | `--config <path>` | yes | TOML file listing repos to audit |
 | `--snapshot-load <dir>` | no | Load repo facts from JSON snapshots under `<dir>` instead of calling GitHub |
 | `--snapshot-save <dir>` | no | Fetch live repo facts from GitHub and save snapshots under `<dir>` |
-| `--format <text|json>` | no | Output format. Defaults to `text` |
+| `--format <text\|json\|loki>` | no | Output format. Defaults to `text` |
+| `--push-loki <url>` | no | After rendering, POST the Loki push payload to `<url>/loki/api/v1/push` |
+| `--loki-job <name>` | no | Override the `job` stream label used for Loki output. Defaults to `github-infra` |
 
 Notes:
 
@@ -148,6 +150,24 @@ The top-level JSON value is an array of per-repository reports:
   }
 ]
 ```
+
+### Loki Output
+
+Use `--format loki` to emit a Grafana Loki push payload as JSON. Each repo gets one stream labelled `{job="github-infra", repo="<owner>/<name>"}`, with one log line per rule outcome containing `rule_id`, `name`, `status`, and (for non-pass) `reason`.
+
+```sh
+cargo run -- --config repos.toml --format loki | \
+  curl -s -X POST http://localhost:3100/loki/api/v1/push \
+       -H 'Content-Type: application/json' --data-binary @-
+```
+
+Or push directly:
+
+```sh
+cargo run -- --config repos.toml --push-loki http://localhost:3100
+```
+
+`--push-loki` is independent of `--format`: you can keep the text report on stdout and still ship results to Loki in one run. A starter Grafana dashboard lives at `dashboards/compliance.json`.
 
 ## Exit Codes
 
