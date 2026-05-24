@@ -76,6 +76,12 @@ pub enum FixEffect {
         ruleset_id: u64,
         ruleset_name: String,
     },
+    EnsureRulesetRequiredStatusCheck {
+        repo: RepoRef,
+        ruleset_id: u64,
+        ruleset_name: String,
+        context: String,
+    },
     SetForkPrApprovalPolicy {
         repo: RepoRef,
         policy: ForkPrApprovalPolicy,
@@ -172,6 +178,7 @@ struct QueuedRulesetUpdate {
     rules_to_add: Vec<RulesetRule>,
     set_pull_request_allowed_merge_methods: Option<Vec<MergeMethod>>,
     set_strict_required_status_checks: Option<bool>,
+    add_required_status_check_contexts: Vec<String>,
 }
 
 impl PlannedFix {
@@ -258,6 +265,13 @@ impl FixEffect {
             Self::SetRulesetStrictRequiredStatusChecks { ruleset_name, .. } => {
                 format!("enable `strict_required_status_checks_policy` on ruleset `{ruleset_name}`",)
             }
+            Self::EnsureRulesetRequiredStatusCheck {
+                ruleset_name,
+                context,
+                ..
+            } => {
+                format!("require status check `{context}` on ruleset `{ruleset_name}`")
+            }
             Self::SetForkPrApprovalPolicy { policy, .. } => {
                 format!(
                     "set fork PR contributor approval policy to `{}`",
@@ -275,6 +289,7 @@ impl FixEffect {
             Self::AddRulesetRules { repo, .. } => repo,
             Self::SetRulesetPullRequestMergeMethods { repo, .. } => repo,
             Self::SetRulesetStrictRequiredStatusChecks { repo, .. } => repo,
+            Self::EnsureRulesetRequiredStatusCheck { repo, .. } => repo,
             Self::SetForkPrApprovalPolicy { repo, .. } => repo,
         }
     }
@@ -376,7 +391,8 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
             }
             FixPlan::Effect(FixEffect::AddRulesetRules { .. })
             | FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods { .. })
-            | FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks { .. }) => {
+            | FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks { .. })
+            | FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck { .. }) => {
                 match execution
                     .ruleset_updates
                     .iter()
@@ -499,6 +515,20 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     fix.rule_id.clone(),
                     *ruleset_id,
                     ruleset_name.clone(),
+                );
+            }
+            FixEffect::EnsureRulesetRequiredStatusCheck {
+                ruleset_id,
+                ruleset_name,
+                context,
+                ..
+            } => {
+                enqueue_ensure_required_status_check(
+                    &mut queued_ruleset_updates,
+                    fix.rule_id.clone(),
+                    *ruleset_id,
+                    ruleset_name.clone(),
+                    context.clone(),
                 );
             }
             FixEffect::SetForkPrApprovalPolicy { policy, .. } => {
@@ -659,6 +689,7 @@ fn enqueue_ruleset_update(
             rules_to_add: rules,
             set_pull_request_allowed_merge_methods: None,
             set_strict_required_status_checks: None,
+            add_required_status_check_contexts: Vec::new(),
         });
     }
 }
@@ -688,6 +719,7 @@ fn enqueue_set_pull_request_merge_methods(
             rules_to_add: Vec::new(),
             set_pull_request_allowed_merge_methods: Some(allowed),
             set_strict_required_status_checks: None,
+            add_required_status_check_contexts: Vec::new(),
         });
     }
 }
@@ -716,6 +748,39 @@ fn enqueue_set_strict_required_status_checks(
             rules_to_add: Vec::new(),
             set_pull_request_allowed_merge_methods: None,
             set_strict_required_status_checks: Some(true),
+            add_required_status_check_contexts: Vec::new(),
+        });
+    }
+}
+
+fn enqueue_ensure_required_status_check(
+    queue: &mut Vec<QueuedRulesetUpdate>,
+    rule_id: RuleId,
+    ruleset_id: u64,
+    ruleset_name: String,
+    context: String,
+) {
+    if let Some(existing) = queue
+        .iter_mut()
+        .find(|entry| entry.ruleset_id == ruleset_id)
+    {
+        existing.rule_ids.push(rule_id);
+        if !existing
+            .add_required_status_check_contexts
+            .iter()
+            .any(|existing_context| existing_context == &context)
+        {
+            existing.add_required_status_check_contexts.push(context);
+        }
+    } else {
+        queue.push(QueuedRulesetUpdate {
+            ruleset_id,
+            ruleset_name,
+            rule_ids: vec![rule_id],
+            rules_to_add: Vec::new(),
+            set_pull_request_allowed_merge_methods: None,
+            set_strict_required_status_checks: None,
+            add_required_status_check_contexts: vec![context],
         });
     }
 }
@@ -765,21 +830,43 @@ fn apply_ruleset_update(
         params.allowed_merge_methods = allowed.clone();
     }
 
-    if queued.set_strict_required_status_checks == Some(true) {
-        let status_rule = ruleset
+    let want_strict = queued.set_strict_required_status_checks == Some(true);
+    let want_contexts = !queued.add_required_status_check_contexts.is_empty();
+    if want_strict || want_contexts {
+        let status_rule = match ruleset
             .rules
             .iter_mut()
             .find(|rule| rule.kind == RulesetRuleType::RequiredStatusChecks)
-            .ok_or_else(|| {
-                format!(
-                    "ruleset `{}` (id {}) on `{repo}` has no `required_status_checks` rule on which to enable `strict_required_status_checks_policy`",
-                    queued.ruleset_name, queued.ruleset_id,
-                )
-            })?;
+        {
+            Some(rule) => rule,
+            None => {
+                ruleset.rules.push(RulesetRule {
+                    kind: RulesetRuleType::RequiredStatusChecks,
+                    parameters: None,
+                });
+                ruleset.rules.last_mut().expect("just pushed")
+            }
+        };
         let params = status_rule
             .parameters
             .get_or_insert_with(RulesetRuleParameters::default);
-        params.strict_required_status_checks_policy = Some(true);
+        if want_strict {
+            params.strict_required_status_checks_policy = Some(true);
+        }
+        for context in &queued.add_required_status_check_contexts {
+            if !params
+                .required_status_checks
+                .iter()
+                .any(|check| check.context == *context)
+            {
+                params
+                    .required_status_checks
+                    .push(crate::github::types::RequiredStatusCheck {
+                        context: context.clone(),
+                        integration_id: None,
+                    });
+            }
+        }
     }
 
     let body = UpdateRulesetRequest::from_ruleset(&ruleset);
@@ -1172,6 +1259,9 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             RuleKind::RulesetRequiresStrictStatusChecks => {
                 plan_set_strict_required_status_checks(facts)
             }
+            RuleKind::RulesetRequiresStatusCheck { check_name } => {
+                plan_ensure_required_status_check(facts, check_name)
+            }
             RuleKind::FileExists { path } if path == ENVRC_PATH => {
                 FixPlan::Effect(FixEffect::OpenAddEnvrcPullRequest {
                     plan: AddEnvrcPullRequestPlan {
@@ -1275,6 +1365,48 @@ fn merge_method_string_set(methods: &[MergeMethod]) -> std::collections::BTreeSe
     methods.iter().map(|m| String::from(m.clone())).collect()
 }
 
+fn plan_ensure_required_status_check(facts: &RepoFacts, context: &str) -> FixPlan {
+    let candidates = active_branch_rulesets_for_default_branch(facts)
+        .filter(|ruleset| {
+            !ruleset.rules.iter().any(|rule| {
+                rule.kind == RulesetRuleType::RequiredStatusChecks
+                    && rule.parameters.as_ref().is_some_and(|parameters| {
+                        parameters
+                            .required_status_checks
+                            .iter()
+                            .any(|check| check.context == context)
+                    })
+            })
+        })
+        .collect::<Vec<_>>();
+
+    match candidates.as_slice() {
+        [] => FixPlan::Rejected {
+            reason: format!(
+                "no active branch ruleset applies to the default branch on which status check `{context}` could be required",
+            ),
+        },
+        [ruleset] => FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
+            repo: facts.repo.clone(),
+            ruleset_id: ruleset.id,
+            ruleset_name: ruleset.name.clone(),
+            context: context.to_owned(),
+        }),
+        many => {
+            let names = many
+                .iter()
+                .map(|ruleset| format!("`{}`", ruleset.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            FixPlan::Rejected {
+                reason: format!(
+                    "multiple active branch rulesets apply to the default branch ({names}); add status check `{context}` to one manually",
+                ),
+            }
+        }
+    }
+}
+
 fn plan_set_strict_required_status_checks(facts: &RepoFacts) -> FixPlan {
     let candidates = active_branch_rulesets_for_default_branch(facts)
         .filter(|ruleset| {
@@ -1289,13 +1421,13 @@ fn plan_set_strict_required_status_checks(facts: &RepoFacts) -> FixPlan {
                         .and_then(|parameters| parameters.strict_required_status_checks_policy)
                         != Some(true)
                 })
-                .unwrap_or(false)
+                .unwrap_or(true)
         })
         .collect::<Vec<_>>();
 
     match candidates.as_slice() {
         [] => FixPlan::Rejected {
-            reason: "no active branch ruleset on the default branch contains a `required_status_checks` rule on which `strict_required_status_checks_policy` could be enabled"
+            reason: "no active branch ruleset applies to the default branch on which `strict_required_status_checks_policy` could be enabled"
                 .to_owned(),
         },
         [ruleset] => FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
@@ -1595,6 +1727,7 @@ fn apply_fix_effect_to_repository_update(
         | FixEffect::AddRulesetRules { .. }
         | FixEffect::SetRulesetPullRequestMergeMethods { .. }
         | FixEffect::SetRulesetStrictRequiredStatusChecks { .. }
+        | FixEffect::EnsureRulesetRequiredStatusCheck { .. }
         | FixEffect::SetForkPrApprovalPolicy { .. } => None,
     }
 }
@@ -3117,7 +3250,11 @@ mod tests {
     }
 
     #[test]
-    fn set_strict_required_status_checks_fix_rejects_when_no_status_check_rule_exists() {
+    fn set_strict_required_status_checks_fix_targets_ruleset_when_status_check_rule_absent() {
+        // RS013 should plan an effect even when the ruleset has no
+        // required_status_checks rule yet. The apply step creates the rule
+        // (with strict=true and an empty checks list); RS002/RS012 fixes that
+        // batch alongside RS013 will populate the checks list.
         let mut facts = base_facts();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
@@ -3128,16 +3265,14 @@ mod tests {
         let fixes = plan_repo_fixes(&[rs013_rule()], &facts);
 
         assert_eq!(fixes.len(), 1);
-        match &fixes[0].plan {
-            FixPlan::Rejected { reason } => {
-                assert!(
-                    reason.contains("required_status_checks"),
-                    "unexpected rejection reason: {reason}"
-                );
-                assert!(reason.contains("strict_required_status_checks_policy"));
-            }
-            other => panic!("expected rejection, got {other:?}"),
-        }
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
+                repo: facts.repo.clone(),
+                ruleset_id: 42,
+                ruleset_name: "main protection".to_owned(),
+            })
+        );
     }
 
     #[test]
@@ -3150,7 +3285,7 @@ mod tests {
         match &fixes[0].plan {
             FixPlan::Rejected { reason } => {
                 assert!(
-                    reason.contains("required_status_checks"),
+                    reason.contains("strict_required_status_checks_policy"),
                     "unexpected rejection reason: {reason}"
                 );
             }
@@ -3317,6 +3452,278 @@ mod tests {
         assert_eq!(executed.len(), 2);
         assert_eq!(executed[0].status, FixStatus::Applied);
         assert_eq!(executed[1].status, FixStatus::Applied);
+    }
+
+    fn rs002_rule() -> Rule {
+        Rule::new(
+            "RS002",
+            "CI status check is required",
+            RuleKind::RulesetRequiresStatusCheck {
+                check_name: "ci".to_owned(),
+            },
+        )
+    }
+
+    fn rs012_rule() -> Rule {
+        Rule::new(
+            "RS012",
+            "all-required-checks-complete status check is required",
+            RuleKind::RulesetRequiresStatusCheck {
+                check_name: "all-required-checks-complete".to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn ensure_required_status_check_fix_targets_sole_active_branch_ruleset_when_rule_absent() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
+
+        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
+                repo: facts.repo.clone(),
+                ruleset_id: 42,
+                ruleset_name: "main protection".to_owned(),
+                context: "ci".to_owned(),
+            })
+        );
+        assert_eq!(
+            fixes[0].planned_report().description,
+            "require status check `ci` on ruleset `main protection`"
+        );
+    }
+
+    #[test]
+    fn ensure_required_status_check_fix_targets_ruleset_when_other_check_present() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredStatusChecks,
+                parameters: Some(RulesetRuleParameters {
+                    required_status_checks: vec![crate::github::types::RequiredStatusCheck {
+                        context: "other".to_owned(),
+                        integration_id: None,
+                    }],
+                    ..RulesetRuleParameters::default()
+                }),
+            }],
+        )];
+
+        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
+                repo: facts.repo.clone(),
+                ruleset_id: 42,
+                ruleset_name: "main protection".to_owned(),
+                context: "ci".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn ensure_required_status_check_fix_not_planned_when_check_already_required() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredStatusChecks,
+                parameters: Some(RulesetRuleParameters {
+                    required_status_checks: vec![crate::github::types::RequiredStatusCheck {
+                        context: "ci".to_owned(),
+                        integration_id: None,
+                    }],
+                    ..RulesetRuleParameters::default()
+                }),
+            }],
+        )];
+
+        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+
+        assert!(
+            fixes.is_empty(),
+            "expected no fixes (rule passes), got {fixes:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_required_status_check_fix_rejects_when_no_ruleset_exists() {
+        let facts = base_facts();
+
+        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].plan {
+            FixPlan::Rejected { reason } => {
+                assert!(
+                    reason.contains("`ci`"),
+                    "unexpected rejection reason: {reason}"
+                );
+                assert!(reason.contains("no active branch ruleset"));
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ensure_required_status_check_fix_rejects_when_multiple_rulesets_match() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![
+            ruleset_for_default_branch(1, "main protection", Vec::new()),
+            ruleset_for_default_branch(2, "extra protection", Vec::new()),
+        ];
+
+        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].plan {
+            FixPlan::Rejected { reason } => {
+                assert!(reason.contains("`main protection`"), "reason: {reason}");
+                assert!(reason.contains("`extra protection`"), "reason: {reason}");
+                assert!(reason.contains("`ci`"));
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_repo_fixes_adds_required_status_check_to_existing_rule() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredStatusChecks,
+                parameters: Some(RulesetRuleParameters {
+                    required_status_checks: vec![crate::github::types::RequiredStatusCheck {
+                        context: "other".to_owned(),
+                        integration_id: Some(7),
+                    }],
+                    strict_required_status_checks_policy: Some(true),
+                    ..RulesetRuleParameters::default()
+                }),
+            }],
+        )];
+        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/rulesets/42",
+                |_| {},
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"other","integration_id":7}]}}]}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/rulesets/42",
+                |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let rules = json["rules"].as_array().unwrap();
+                    assert_eq!(rules.len(), 1);
+                    let params = &rules[0]["parameters"];
+                    let checks = params["required_status_checks"].as_array().unwrap();
+                    let contexts: std::collections::BTreeSet<&str> = checks
+                        .iter()
+                        .map(|check| check["context"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        contexts,
+                        ["ci", "other"].into_iter().collect()
+                    );
+                    // The existing integration_id on "other" must be preserved.
+                    let other_check = checks
+                        .iter()
+                        .find(|check| check["context"] == "other")
+                        .unwrap();
+                    assert_eq!(other_check["integration_id"], 7);
+                    assert_eq!(params["strict_required_status_checks_policy"], true);
+                },
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[]}"#
+                    .to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_batches_rs002_rs012_rs013_into_one_ruleset_put() {
+        // This is the robocop case: the ruleset has no required_status_checks
+        // rule at all. RS002, RS012, RS013 all fail. The auto-fix must
+        // create the rule in a single PUT with both contexts and strict=true.
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
+        let fixes = plan_repo_fixes(&[rs002_rule(), rs012_rule(), rs013_rule()], &facts);
+        assert_eq!(fixes.len(), 3);
+
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/rulesets/42",
+                |_| {},
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[]}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/rulesets/42",
+                |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let rules = json["rules"].as_array().unwrap();
+                    assert_eq!(rules.len(), 1, "expected exactly one rule (required_status_checks)");
+                    assert_eq!(rules[0]["type"], "required_status_checks");
+                    let params = &rules[0]["parameters"];
+                    assert_eq!(params["strict_required_status_checks_policy"], true);
+                    let checks = params["required_status_checks"].as_array().unwrap();
+                    let contexts: std::collections::BTreeSet<&str> = checks
+                        .iter()
+                        .map(|check| check["context"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        contexts,
+                        ["all-required-checks-complete", "ci"].into_iter().collect()
+                    );
+                },
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[]}"#
+                    .to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 3);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+        assert_eq!(executed[1].status, FixStatus::Applied);
+        assert_eq!(executed[2].status, FixStatus::Applied);
     }
 
     fn st007_rule() -> Rule {
