@@ -15,9 +15,9 @@ use ureq::http::header::HeaderMap;
 use ureq::{Agent, Body, Error as UreqError};
 
 use crate::github::types::{
-    BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, GitReference, GitTree,
-    PullRequest, Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
-    RepositoryUpdate, Ruleset, UpdateRepositoryFile, UpdateRulesetRequest,
+    BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, ForkPrWorkflowsPermission,
+    GitReference, GitTree, PullRequest, Repository, RepositoryContents, RepositoryDirectoryEntry,
+    RepositoryFileContent, RepositoryUpdate, Ruleset, UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::types::{BranchName, RepoRef};
 
@@ -201,6 +201,16 @@ impl GitHubClient {
         let encoded_branch = percent_encode_path_segment(&branch.to_string());
         self.get_json_optional(&format!(
             "{}/repos/{repo}/branches/{encoded_branch}/protection",
+            self.api_base_url
+        ))
+    }
+
+    pub fn get_fork_pr_workflows_permission(
+        &mut self,
+        repo: &RepoRef,
+    ) -> Result<Option<ForkPrWorkflowsPermission>, GitHubClientError> {
+        self.get_json_optional(&format!(
+            "{}/repos/{repo}/actions/permissions/fork-pr-workflows",
             self.api_base_url
         ))
     }

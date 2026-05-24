@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
+use crate::github::types::ForkPrWorkflowsPolicy;
 use crate::types::RuleId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +15,7 @@ pub enum RepoSetting {
     AllowSquashMerge,
     AllowMergeCommit,
     AllowRebaseMerge,
+    ForkPrWorkflowsPolicy,
 }
 
 impl RepoSetting {
@@ -28,6 +30,7 @@ impl RepoSetting {
             Self::AllowSquashMerge => "allow_squash_merge",
             Self::AllowMergeCommit => "allow_merge_commit",
             Self::AllowRebaseMerge => "allow_rebase_merge",
+            Self::ForkPrWorkflowsPolicy => "fork_pr_workflows_policy",
         }
     }
 
@@ -44,37 +47,42 @@ impl RepoSetting {
     }
 
     pub(super) fn read(&self, settings: &RepoSettings) -> SettingValue {
-        let value = match self {
-            Self::Private => settings.private,
-            Self::Archived => settings.archived,
-            Self::Disabled => settings.disabled,
-            Self::AllowAutoMerge => settings.allow_auto_merge,
-            Self::DeleteBranchOnMerge => settings.delete_branch_on_merge,
-            Self::AllowUpdateBranch => settings.allow_update_branch,
-            Self::AllowSquashMerge => settings.allow_squash_merge,
-            Self::AllowMergeCommit => settings.allow_merge_commit,
-            Self::AllowRebaseMerge => settings.allow_rebase_merge,
-        };
-
-        SettingValue::Bool(value)
+        match self {
+            Self::Private => SettingValue::Bool(settings.private),
+            Self::Archived => SettingValue::Bool(settings.archived),
+            Self::Disabled => SettingValue::Bool(settings.disabled),
+            Self::AllowAutoMerge => SettingValue::Bool(settings.allow_auto_merge),
+            Self::DeleteBranchOnMerge => SettingValue::Bool(settings.delete_branch_on_merge),
+            Self::AllowUpdateBranch => SettingValue::Bool(settings.allow_update_branch),
+            Self::AllowSquashMerge => SettingValue::Bool(settings.allow_squash_merge),
+            Self::AllowMergeCommit => SettingValue::Bool(settings.allow_merge_commit),
+            Self::AllowRebaseMerge => SettingValue::Bool(settings.allow_rebase_merge),
+            Self::ForkPrWorkflowsPolicy => {
+                SettingValue::ForkPrWorkflowsPolicy(settings.fork_pr_workflows_policy.clone())
+            }
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SettingValue {
     Bool(bool),
+    ForkPrWorkflowsPolicy(Option<ForkPrWorkflowsPolicy>),
 }
 
 impl SettingValue {
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Bool(value) => value.to_string(),
+            Self::ForkPrWorkflowsPolicy(Some(policy)) => String::from(policy.clone()),
+            Self::ForkPrWorkflowsPolicy(None) => "unknown".to_owned(),
         }
     }
 
-    pub(crate) fn as_bool(&self) -> bool {
+    pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
-            Self::Bool(value) => *value,
+            Self::Bool(value) => Some(*value),
+            Self::ForkPrWorkflowsPolicy(_) => None,
         }
     }
 }

@@ -323,7 +323,8 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
                         reason: reason.clone(),
                     }),
                     None => fix.with_status(FixStatus::Failed {
-                        reason: "internal error: missing ruleset update execution result".to_owned(),
+                        reason: "internal error: missing ruleset update execution result"
+                            .to_owned(),
                     }),
                 }
             }
@@ -508,12 +509,14 @@ fn apply_ruleset_update(
     repo: &RepoRef,
     queued: &QueuedRulesetUpdate,
 ) -> Result<(), String> {
-    let mut ruleset = client.get_ruleset(repo, queued.ruleset_id).map_err(|error| {
-        format!(
-            "failed to fetch ruleset `{}` (id {}) from `{repo}`: {error}",
-            queued.ruleset_name, queued.ruleset_id,
-        )
-    })?;
+    let mut ruleset = client
+        .get_ruleset(repo, queued.ruleset_id)
+        .map_err(|error| {
+            format!(
+                "failed to fetch ruleset `{}` (id {}) from `{repo}`: {error}",
+                queued.ruleset_name, queued.ruleset_id,
+            )
+        })?;
 
     for rule in &queued.rules_to_add {
         if !ruleset
@@ -759,7 +762,9 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
                 FixPlan::Effect(FixEffect::SetRepositorySetting {
                     repo: facts.repo.clone(),
                     setting: setting.clone(),
-                    value: expected.as_bool(),
+                    value: expected
+                        .as_bool()
+                        .expect("auto-fix is gated to bool-valued repository settings"),
                 })
             }
             RuleKind::RepoSettingMatch { setting, .. } => FixPlan::Rejected {
@@ -1077,6 +1082,9 @@ fn apply_repo_setting_update(update: &mut RepositoryUpdate, setting: &RepoSettin
         RepoSetting::AllowSquashMerge => update.allow_squash_merge = Some(value),
         RepoSetting::AllowMergeCommit => update.allow_merge_commit = Some(value),
         RepoSetting::AllowRebaseMerge => update.allow_rebase_merge = Some(value),
+        RepoSetting::ForkPrWorkflowsPolicy => {
+            unreachable!("fork PR workflows policy is not configurable via PATCH /repos")
+        }
     }
 }
 
@@ -1129,6 +1137,7 @@ mod tests {
                 allow_squash_merge: false,
                 allow_merge_commit: true,
                 allow_rebase_merge: false,
+                fork_pr_workflows_policy: None,
             },
             rulesets: Vec::new(),
             legacy_branch_protection: None,
@@ -1189,7 +1198,7 @@ mod tests {
             .map(|fix| (fix.rule_id.to_string(), fix))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(fixes.len(), 16);
+        assert_eq!(fixes.len(), 17);
         assert_eq!(
             by_rule_id["ST001"].plan,
             FixPlan::Effect(FixEffect::SetRepositorySetting {
@@ -1780,7 +1789,11 @@ mod tests {
     #[test]
     fn add_ruleset_rule_fix_targets_sole_active_branch_ruleset() {
         let mut facts = base_facts();
-        facts.rulesets = vec![ruleset_for_default_branch(42, "main protection", Vec::new())];
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
 
         let fixes = plan_repo_fixes(&[rs005_rule()], &facts);
 
@@ -1866,7 +1879,11 @@ mod tests {
     #[test]
     fn execute_repo_fixes_adds_required_linear_history_to_ruleset() {
         let mut facts = base_facts();
-        facts.rulesets = vec![ruleset_for_default_branch(42, "main protection", Vec::new())];
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
         let fixes = plan_repo_fixes(&[rs005_rule()], &facts);
 
         let server = TestServer::spawn(vec![
@@ -1908,7 +1925,11 @@ mod tests {
     #[test]
     fn execute_repo_fixes_no_ops_when_ruleset_already_has_the_rule() {
         let mut facts = base_facts();
-        facts.rulesets = vec![ruleset_for_default_branch(42, "main protection", Vec::new())];
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
         let fixes = plan_repo_fixes(&[rs005_rule()], &facts);
 
         // GET returns a ruleset that already includes the rule (e.g. an
@@ -1953,7 +1974,11 @@ mod tests {
     #[test]
     fn execute_repo_fixes_reports_failure_when_ruleset_put_fails() {
         let mut facts = base_facts();
-        facts.rulesets = vec![ruleset_for_default_branch(42, "main protection", Vec::new())];
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
         let fixes = plan_repo_fixes(&[rs005_rule()], &facts);
 
         let server = TestServer::spawn(vec![

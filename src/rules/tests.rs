@@ -7,9 +7,9 @@ use super::workflows::is_commit_sha;
 use super::*;
 use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
-    BranchProtection, BypassActor, BypassActorType, BypassMode, RefNameCondition,
-    RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
-    RulesetRuleParameters, RulesetRuleType, RulesetTarget,
+    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrWorkflowsPolicy,
+    RefNameCondition, RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement,
+    RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
 };
 use crate::types::{BranchName, RepoRef, RuleId};
 use crate::workflow::model::{
@@ -41,6 +41,17 @@ fn repo_ref_strategy() -> impl Strategy<Value = RepoRef> {
     (identifier(), identifier()).prop_map(|(owner, name)| RepoRef::new(owner, name))
 }
 
+fn fork_pr_workflows_policy_strategy() -> impl Strategy<Value = Option<ForkPrWorkflowsPolicy>> {
+    prop_oneof![
+        Just(None),
+        Just(Some(ForkPrWorkflowsPolicy::AllExternalCollaborators)),
+        Just(Some(
+            ForkPrWorkflowsPolicy::FirstTimeContributorsNewToGithub
+        )),
+        Just(Some(ForkPrWorkflowsPolicy::FirstTimeContributors)),
+    ]
+}
+
 fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
     (
         any::<bool>(),
@@ -52,6 +63,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
         any::<bool>(),
         any::<bool>(),
         any::<bool>(),
+        fork_pr_workflows_policy_strategy(),
     )
         .prop_map(
             |(
@@ -64,6 +76,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
                 allow_squash_merge,
                 allow_merge_commit,
                 allow_rebase_merge,
+                fork_pr_workflows_policy,
             )| RepoSettings {
                 private,
                 archived,
@@ -74,6 +87,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
                 allow_squash_merge,
                 allow_merge_commit,
                 allow_rebase_merge,
+                fork_pr_workflows_policy,
             },
         )
 }
@@ -479,6 +493,7 @@ fn empty_repo_settings() -> RepoSettings {
         allow_squash_merge: false,
         allow_merge_commit: false,
         allow_rebase_merge: false,
+        fork_pr_workflows_policy: None,
     }
 }
 
@@ -1168,6 +1183,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("ST004".to_owned(), "pass"),
         ("ST005".to_owned(), "pass"),
         ("ST006".to_owned(), "pass"),
+        ("ST007".to_owned(), "pass"),
         ("WF001".to_owned(), "pass"),
         ("WF002".to_owned(), "pass"),
         ("WF003".to_owned(), "pass"),
@@ -1199,6 +1215,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("ST004".to_owned(), "fail"),
         ("ST005".to_owned(), "pass"),
         ("ST006".to_owned(), "fail"),
+        ("ST007".to_owned(), "fail"),
         ("WF001".to_owned(), "fail"),
         ("WF002".to_owned(), "fail"),
         ("WF003".to_owned(), "fail"),
