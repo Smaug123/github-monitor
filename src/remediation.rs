@@ -7,8 +7,9 @@ use crate::facts::RepoFacts;
 use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath};
 use crate::github::types::{
     ContentEncoding, CreateGitReference, CreatePullRequest, ForkPrApprovalPolicy, MergeMethod,
-    PullRequest, RepositoryFileContent, RepositoryUpdate, RulesetRule, RulesetRuleParameters,
-    RulesetRuleType, UpdateRepositoryFile, UpdateRulesetRequest,
+    PullRequest, RefNameCondition, RepositoryFileContent, RepositoryUpdate, RulesetConditions,
+    RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
+    UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::rules::{
     RepoSetting, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
@@ -91,6 +92,11 @@ pub enum FixEffect {
         repo: RepoRef,
         branch: BranchName,
     },
+    CreateDefaultBranchRuleset {
+        repo: RepoRef,
+        default_branch: BranchName,
+        ruleset_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +156,13 @@ struct RepoFixExecution {
     ruleset_updates: Vec<RulesetUpdateExecution>,
     fork_pr_approval_policy: Option<Result<(), String>>,
     legacy_branch_protection_deletion: Option<Result<(), String>>,
+    default_branch_ruleset_creation: Option<Result<(), String>>,
+}
+
+#[derive(Debug, Clone)]
+struct QueuedDefaultBranchRulesetCreation {
+    default_branch: BranchName,
+    ruleset_name: String,
 }
 
 #[derive(Debug)]
@@ -287,6 +300,15 @@ impl FixEffect {
             Self::DeleteLegacyBranchProtection { branch, .. } => {
                 format!("delete legacy branch protection on `{branch}`")
             }
+            Self::CreateDefaultBranchRuleset {
+                default_branch,
+                ruleset_name,
+                ..
+            } => {
+                format!(
+                    "create active branch ruleset `{ruleset_name}` covering `{default_branch}`",
+                )
+            }
         }
     }
 
@@ -301,6 +323,7 @@ impl FixEffect {
             Self::EnsureRulesetRequiredStatusCheck { repo, .. } => repo,
             Self::SetForkPrApprovalPolicy { repo, .. } => repo,
             Self::DeleteLegacyBranchProtection { repo, .. } => repo,
+            Self::CreateDefaultBranchRuleset { repo, .. } => repo,
         }
     }
 }
@@ -449,6 +472,19 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
                     }),
                 }
             }
+            FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset { .. }) => {
+                match execution.default_branch_ruleset_creation.as_ref() {
+                    Some(Ok(())) => fix.with_status(FixStatus::Applied),
+                    Some(Err(reason)) => fix.with_status(FixStatus::Failed {
+                        reason: reason.clone(),
+                    }),
+                    None => fix.with_status(FixStatus::Failed {
+                        reason:
+                            "internal error: missing default branch ruleset creation execution result"
+                                .to_owned(),
+                    }),
+                }
+            }
         })
         .collect()
 }
@@ -462,6 +498,8 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
     let mut queued_ruleset_updates = Vec::<QueuedRulesetUpdate>::new();
     let mut fork_pr_approval_policy_to_apply = None::<ForkPrApprovalPolicy>;
     let mut legacy_branch_protection_to_delete = None::<BranchName>;
+    let mut default_branch_ruleset_to_create =
+        None::<QueuedDefaultBranchRulesetCreation>;
     let mut internal_error = None::<String>;
 
     for fix in fixes {
@@ -561,6 +599,23 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             FixEffect::DeleteLegacyBranchProtection { branch, .. } => {
                 legacy_branch_protection_to_delete = Some(branch.clone());
             }
+            FixEffect::CreateDefaultBranchRuleset {
+                default_branch,
+                ruleset_name,
+                ..
+            } => {
+                if default_branch_ruleset_to_create.is_some() && internal_error.is_none() {
+                    internal_error = Some(
+                        "internal error: multiple default-branch ruleset creations planned"
+                            .to_owned(),
+                    );
+                } else {
+                    default_branch_ruleset_to_create = Some(QueuedDefaultBranchRulesetCreation {
+                        default_branch: default_branch.clone(),
+                        ruleset_name: ruleset_name.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -593,6 +648,9 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 .as_ref()
                 .map(|_| Err(reason.clone())),
             legacy_branch_protection_deletion: legacy_branch_protection_to_delete
+                .as_ref()
+                .map(|_| Err(reason.clone())),
+            default_branch_ruleset_creation: default_branch_ruleset_to_create
                 .as_ref()
                 .map(|_| Err(reason.clone())),
         };
@@ -628,6 +686,9 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 .as_ref()
                 .map(|_| Err(reason.clone())),
             legacy_branch_protection_deletion: legacy_branch_protection_to_delete
+                .as_ref()
+                .map(|_| Err(reason.clone())),
+            default_branch_ruleset_creation: default_branch_ruleset_to_create
                 .as_ref()
                 .map(|_| Err(reason.clone())),
         };
@@ -694,13 +755,47 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             .map_err(|error| error.to_string())
     });
 
+    let default_branch_ruleset_creation = default_branch_ruleset_to_create.map(|queued| {
+        let repo = repo
+            .as_ref()
+            .expect("repository recorded whenever a ruleset creation effect is present");
+        create_default_branch_ruleset(client, repo, &queued)
+    });
+
     RepoFixExecution {
         repo_settings,
         pull_requests,
         ruleset_updates,
         fork_pr_approval_policy,
         legacy_branch_protection_deletion,
+        default_branch_ruleset_creation,
     }
+}
+
+fn create_default_branch_ruleset(
+    client: &mut GitHubClient,
+    repo: &RepoRef,
+    queued: &QueuedDefaultBranchRulesetCreation,
+) -> Result<(), String> {
+    let body = UpdateRulesetRequest {
+        name: queued.ruleset_name.clone(),
+        target: RulesetTarget::Branch,
+        enforcement: RulesetEnforcement::Active,
+        conditions: Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: vec!["~DEFAULT_BRANCH".to_owned()],
+                exclude: Vec::new(),
+            }),
+        }),
+        bypass_actors: Vec::new(),
+        rules: Vec::new(),
+    };
+    client.create_ruleset(repo, &body).map(|_| ()).map_err(|error| {
+        format!(
+            "failed to create ruleset `{}` on `{repo}` covering `{}`: {error}",
+            queued.ruleset_name, queued.default_branch,
+        )
+    })
 }
 
 fn enqueue_ruleset_update(
@@ -1316,10 +1411,29 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             RuleKind::UsesRulesetsNotLegacyProtection => {
                 plan_delete_legacy_branch_protection(facts)
             }
+            RuleKind::RulesetExists => plan_create_default_branch_ruleset(facts),
             _ => FixPlan::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
             },
         },
+    })
+}
+
+const DEFAULT_BRANCH_RULESET_NAME: &str = "github-infra: default branch protection";
+
+fn plan_create_default_branch_ruleset(facts: &RepoFacts) -> FixPlan {
+    if active_branch_rulesets_for_default_branch(facts).next().is_some() {
+        return FixPlan::Rejected {
+            reason: "internal error: ruleset creation planned despite an active branch ruleset \
+                     already applying to the default branch"
+                .to_owned(),
+        };
+    }
+
+    FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset {
+        repo: facts.repo.clone(),
+        default_branch: facts.default_branch.clone(),
+        ruleset_name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
     })
 }
 
@@ -1798,7 +1912,8 @@ fn apply_fix_effect_to_repository_update(
         | FixEffect::SetRulesetStrictRequiredStatusChecks { .. }
         | FixEffect::EnsureRulesetRequiredStatusCheck { .. }
         | FixEffect::SetForkPrApprovalPolicy { .. }
-        | FixEffect::DeleteLegacyBranchProtection { .. } => None,
+        | FixEffect::DeleteLegacyBranchProtection { .. }
+        | FixEffect::CreateDefaultBranchRuleset { .. } => None,
     }
 }
 
@@ -1977,9 +2092,17 @@ mod tests {
         );
         assert_eq!(
             by_rule_id["RS001"].plan,
-            FixPlan::Rejected {
-                reason: "automatic fixes for this rule are not implemented yet".to_owned(),
-            }
+            FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset {
+                repo: facts.repo.clone(),
+                default_branch: BranchName::new("main"),
+                ruleset_name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+            })
+        );
+        assert_eq!(
+            by_rule_id["RS001"].planned_report().description,
+            format!(
+                "create active branch ruleset `{DEFAULT_BRANCH_RULESET_NAME}` covering `main`",
+            )
         );
         assert_eq!(
             by_rule_id["WF003"].planned_report().status,
@@ -1991,6 +2114,47 @@ mod tests {
             by_rule_id["ST006"].planned_report().status,
             FixStatus::Planned
         );
+    }
+
+    #[test]
+    fn rs001_plans_creation_when_no_active_branch_ruleset_covers_default() {
+        let facts = base_facts();
+        let rules = vec![Rule::new(
+            "RS001",
+            "Rulesets exist",
+            RuleKind::RulesetExists,
+        )];
+        let fixes = plan_repo_fixes(&rules, &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset {
+                repo: facts.repo.clone(),
+                default_branch: facts.default_branch.clone(),
+                ruleset_name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn rs001_does_not_plan_when_an_active_ruleset_already_covers_default() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            1,
+            "main protection",
+            Vec::new(),
+        )];
+
+        let rules = vec![Rule::new(
+            "RS001",
+            "Rulesets exist",
+            RuleKind::RulesetExists,
+        )];
+        let fixes = plan_repo_fixes(&rules, &facts);
+
+        // RS001 passes, so no fix is planned at all.
+        assert!(fixes.is_empty());
     }
 
     #[test]
@@ -4016,6 +4180,75 @@ mod tests {
             FixStatus::Failed { reason } => {
                 assert!(
                     reason.contains("branches/main/protection"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected failed status, got {other:?}"),
+        }
+    }
+
+    fn rs001_rule() -> Rule {
+        Rule::new("RS001", "Rulesets exist", RuleKind::RulesetExists)
+    }
+
+    #[test]
+    fn execute_repo_fixes_creates_default_branch_ruleset() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[rs001_rule()], &facts);
+
+        let server = TestServer::spawn(vec![ExpectedRequest::json(
+            "POST",
+            "/repos/example-org/repo/rulesets",
+            |body| {
+                let value: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(value["name"], DEFAULT_BRANCH_RULESET_NAME);
+                assert_eq!(value["target"], "branch");
+                assert_eq!(value["enforcement"], "active");
+                assert_eq!(value["conditions"]["ref_name"]["include"][0], "~DEFAULT_BRANCH");
+                assert_eq!(value["conditions"]["ref_name"]["exclude"].as_array().unwrap().len(), 0);
+                assert_eq!(value["bypass_actors"].as_array().unwrap().len(), 0);
+                assert_eq!(value["rules"].as_array().unwrap().len(), 0);
+            },
+            r#"{"id":99,"name":"github-infra: default branch protection","target":"branch","enforcement":"active"}"#.to_owned(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].rule_id.to_string(), "RS001");
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_reports_failure_when_create_ruleset_fails() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[rs001_rule()], &facts);
+
+        let server = TestServer::spawn(vec![ExpectedRequest::with_status_and_path_assertion(
+            "POST",
+            |path| {
+                assert_eq!(path, "/repos/example-org/repo/rulesets");
+            },
+            |_| {},
+            500,
+            "{}".to_owned(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        match &executed[0].status {
+            FixStatus::Failed { reason } => {
+                assert!(
+                    reason.contains("failed to create ruleset"),
                     "unexpected failure reason: {reason}"
                 );
             }

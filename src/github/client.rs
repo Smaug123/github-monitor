@@ -215,6 +215,18 @@ impl GitHubClient {
         )
     }
 
+    pub fn create_ruleset(
+        &mut self,
+        repo: &RepoRef,
+        create: &UpdateRulesetRequest,
+    ) -> Result<Ruleset, GitHubClientError> {
+        self.post_json(
+            repo,
+            &format!("{}/repos/{repo}/rulesets", self.api_base_url),
+            create,
+        )
+    }
+
     pub fn get_branch_protection(
         &mut self,
         repo: &RepoRef,
