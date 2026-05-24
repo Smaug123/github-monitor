@@ -1017,7 +1017,13 @@ fn create_default_branch_ruleset(
 fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRulesetUpdate) {
     for rule in &queued.rules_to_add {
         if !rules.iter().any(|existing| existing.kind == rule.kind) {
-            rules.push(rule.clone());
+            let to_push = if rule.kind == RulesetRuleType::PullRequest && rule.parameters.is_none()
+            {
+                new_pull_request_rule_with_required_defaults()
+            } else {
+                rule.clone()
+            };
+            rules.push(to_push);
         }
     }
 
@@ -1028,10 +1034,7 @@ fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRules
         {
             Some(rule) => rule,
             None => {
-                rules.push(RulesetRule {
-                    kind: RulesetRuleType::PullRequest,
-                    parameters: None,
-                });
+                rules.push(new_pull_request_rule_with_required_defaults());
                 rules.last_mut().expect("just pushed")
             }
         };
@@ -1077,6 +1080,24 @@ fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRules
                     });
             }
         }
+    }
+}
+
+/// Builds a fresh `pull_request` rule with the parameters GitHub's
+/// create-ruleset endpoint requires. Sending the rule without these fields
+/// causes a 422 ("data matches no possible input"). All defaults are
+/// permissive — explicit rules (e.g. RS011) override them.
+fn new_pull_request_rule_with_required_defaults() -> RulesetRule {
+    RulesetRule {
+        kind: RulesetRuleType::PullRequest,
+        parameters: Some(RulesetRuleParameters {
+            required_approving_review_count: Some(0),
+            dismiss_stale_reviews_on_push: Some(false),
+            require_code_owner_review: Some(false),
+            require_last_push_approval: Some(false),
+            required_review_thread_resolution: Some(false),
+            ..RulesetRuleParameters::default()
+        }),
     }
 }
 
@@ -4422,6 +4443,61 @@ mod tests {
                     .map(|check| check["context"].as_str().unwrap())
                     .collect();
                 assert_eq!(contexts, ["ci"].into_iter().collect());
+            },
+            r#"{"id":99,"name":"github-infra: default branch protection","target":"branch","enforcement":"active"}"#.to_owned(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 3);
+        for fix in &executed {
+            assert_eq!(
+                fix.status,
+                FixStatus::Applied,
+                "rule {} expected Applied, got {:?}",
+                fix.rule_id,
+                fix.status
+            );
+        }
+    }
+
+    #[test]
+    fn creation_post_supplies_required_defaults_for_new_pull_request_rule() {
+        // Reproduces the live 422 we hit: GitHub's create-ruleset endpoint
+        // rejects a pull_request rule that omits required_approving_review_count
+        // and the dismiss/require_* booleans, even when only allowed_merge_methods
+        // is being set. The autofix must supply permissive defaults.
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[rs001_rule(), rs010_rule(), rs011_rule()], &facts);
+        assert_eq!(fixes.len(), 3);
+
+        let server = TestServer::spawn(vec![ExpectedRequest::json(
+            "POST",
+            "/repos/example-org/repo/rulesets",
+            |body| {
+                let value: serde_json::Value = serde_json::from_str(body).unwrap();
+                let rules = value["rules"].as_array().unwrap();
+                let pr_rule = rules
+                    .iter()
+                    .find(|rule| rule["type"] == "pull_request")
+                    .expect("expected pull_request rule in body");
+                let params = &pr_rule["parameters"];
+                assert_eq!(params["required_approving_review_count"], 0);
+                assert_eq!(params["dismiss_stale_reviews_on_push"], false);
+                assert_eq!(params["require_code_owner_review"], false);
+                assert_eq!(params["require_last_push_approval"], false);
+                assert_eq!(params["required_review_thread_resolution"], false);
+                let methods: Vec<&str> = params["allowed_merge_methods"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|method| method.as_str().unwrap())
+                    .collect();
+                assert_eq!(methods, vec!["squash"]);
             },
             r#"{"id":99,"name":"github-infra: default branch protection","target":"branch","enforcement":"active"}"#.to_owned(),
         )]);
