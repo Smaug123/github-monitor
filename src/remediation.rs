@@ -63,25 +63,21 @@ pub enum FixEffect {
     },
     AddRulesetRules {
         repo: RepoRef,
-        ruleset_id: u64,
-        ruleset_name: String,
+        target: PlannedRulesetTarget,
         rules: Vec<RulesetRule>,
     },
     SetRulesetPullRequestMergeMethods {
         repo: RepoRef,
-        ruleset_id: u64,
-        ruleset_name: String,
+        target: PlannedRulesetTarget,
         allowed: Vec<MergeMethod>,
     },
     SetRulesetStrictRequiredStatusChecks {
         repo: RepoRef,
-        ruleset_id: u64,
-        ruleset_name: String,
+        target: PlannedRulesetTarget,
     },
     EnsureRulesetRequiredStatusCheck {
         repo: RepoRef,
-        ruleset_id: u64,
-        ruleset_name: String,
+        target: PlannedRulesetTarget,
         context: String,
     },
     SetForkPrApprovalPolicy {
@@ -94,9 +90,47 @@ pub enum FixEffect {
     },
     CreateDefaultBranchRuleset {
         repo: RepoRef,
-        default_branch: BranchName,
-        ruleset_name: String,
+        target: PlannedRulesetTarget,
     },
+}
+
+/// Identifies a ruleset that a planned fix wants to modify or create. `Existing`
+/// names a ruleset that the live facts already contain (by GitHub-assigned id);
+/// `PendingDefaultBranch` names the default-branch ruleset that RS001's fix
+/// would create in the same batch.
+///
+/// Why this isn't just `Option<u64>`: planning and the executor need a single
+/// merge key per ruleset so several rules' fixes compose into one GitHub call.
+/// For pending creation the id doesn't exist yet, so we key by "the one
+/// default-branch ruleset we're about to create" and let the executor decide
+/// at apply-time whether that resolves to a POST or, if RS001 isn't in the
+/// batch, a per-effect rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannedRulesetTarget {
+    Existing {
+        id: u64,
+        name: String,
+    },
+    PendingDefaultBranch {
+        default_branch: BranchName,
+        name: String,
+    },
+}
+
+impl PlannedRulesetTarget {
+    fn name(&self) -> &str {
+        match self {
+            Self::Existing { name, .. } | Self::PendingDefaultBranch { name, .. } => name,
+        }
+    }
+
+    fn merges_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Existing { id: a, .. }, Self::Existing { id: b, .. }) => a == b,
+            (Self::PendingDefaultBranch { .. }, Self::PendingDefaultBranch { .. }) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,13 +190,6 @@ struct RepoFixExecution {
     ruleset_updates: Vec<RulesetUpdateExecution>,
     fork_pr_approval_policy: Option<Result<(), String>>,
     legacy_branch_protection_deletion: Option<Result<(), String>>,
-    default_branch_ruleset_creation: Option<Result<(), String>>,
-}
-
-#[derive(Debug, Clone)]
-struct QueuedDefaultBranchRulesetCreation {
-    default_branch: BranchName,
-    ruleset_name: String,
 }
 
 #[derive(Debug)]
@@ -191,13 +218,17 @@ struct QueuedEnvrcPullRequest {
 
 #[derive(Debug, Clone)]
 struct QueuedRulesetUpdate {
-    ruleset_id: u64,
-    ruleset_name: String,
+    target: PlannedRulesetTarget,
     rule_ids: Vec<RuleId>,
     rules_to_add: Vec<RulesetRule>,
     set_pull_request_allowed_merge_methods: Option<Vec<MergeMethod>>,
     set_strict_required_status_checks: Option<bool>,
     add_required_status_check_contexts: Vec<String>,
+    /// `true` if a `CreateDefaultBranchRuleset` effect contributed to this
+    /// queue entry. The apply step uses this to decide between POST (new
+    /// ruleset) and GET+PUT (mutate existing). Only meaningful when `target`
+    /// is `PendingDefaultBranch`.
+    create: bool,
 }
 
 impl PlannedFix {
@@ -251,26 +282,21 @@ impl FixEffect {
             Self::OpenAddEnvrcPullRequest { .. } => {
                 format!("open a pull request that adds `{ENVRC_PATH}` with `use flake`")
             }
-            Self::AddRulesetRules {
-                ruleset_name,
-                rules,
-                ..
-            } => {
+            Self::AddRulesetRules { target, rules, .. } => {
                 let rule_names = rules
                     .iter()
                     .map(|rule| format!("`{}`", ruleset_rule_type_name(&rule.kind)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "add {} {} to ruleset `{ruleset_name}`: {rule_names}",
+                    "add {} {} to ruleset `{}`: {rule_names}",
                     rules.len(),
                     pluralize(rules.len(), "rule", "rules"),
+                    target.name(),
                 )
             }
             Self::SetRulesetPullRequestMergeMethods {
-                ruleset_name,
-                allowed,
-                ..
+                target, allowed, ..
             } => {
                 let methods = allowed
                     .iter()
@@ -278,18 +304,23 @@ impl FixEffect {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "set `pull_request` allowed merge methods on ruleset `{ruleset_name}` to: {methods}",
+                    "set `pull_request` allowed merge methods on ruleset `{}` to: {methods}",
+                    target.name(),
                 )
             }
-            Self::SetRulesetStrictRequiredStatusChecks { ruleset_name, .. } => {
-                format!("enable `strict_required_status_checks_policy` on ruleset `{ruleset_name}`",)
+            Self::SetRulesetStrictRequiredStatusChecks { target, .. } => {
+                format!(
+                    "enable `strict_required_status_checks_policy` on ruleset `{}`",
+                    target.name(),
+                )
             }
             Self::EnsureRulesetRequiredStatusCheck {
-                ruleset_name,
-                context,
-                ..
+                target, context, ..
             } => {
-                format!("require status check `{context}` on ruleset `{ruleset_name}`")
+                format!(
+                    "require status check `{context}` on ruleset `{}`",
+                    target.name(),
+                )
             }
             Self::SetForkPrApprovalPolicy { policy, .. } => {
                 format!(
@@ -300,15 +331,15 @@ impl FixEffect {
             Self::DeleteLegacyBranchProtection { branch, .. } => {
                 format!("delete legacy branch protection on `{branch}`")
             }
-            Self::CreateDefaultBranchRuleset {
-                default_branch,
-                ruleset_name,
-                ..
-            } => {
-                format!(
-                    "create active branch ruleset `{ruleset_name}` covering `{default_branch}`",
-                )
-            }
+            Self::CreateDefaultBranchRuleset { target, .. } => match target {
+                PlannedRulesetTarget::PendingDefaultBranch {
+                    default_branch,
+                    name,
+                } => format!("create active branch ruleset `{name}` covering `{default_branch}`",),
+                PlannedRulesetTarget::Existing { name, .. } => format!(
+                    "create active branch ruleset `{name}` (internal error: target marked as existing)",
+                ),
+            },
         }
     }
 
@@ -324,6 +355,21 @@ impl FixEffect {
             Self::SetForkPrApprovalPolicy { repo, .. } => repo,
             Self::DeleteLegacyBranchProtection { repo, .. } => repo,
             Self::CreateDefaultBranchRuleset { repo, .. } => repo,
+        }
+    }
+
+    fn ruleset_target(&self) -> Option<&PlannedRulesetTarget> {
+        match self {
+            Self::AddRulesetRules { target, .. }
+            | Self::SetRulesetPullRequestMergeMethods { target, .. }
+            | Self::SetRulesetStrictRequiredStatusChecks { target, .. }
+            | Self::EnsureRulesetRequiredStatusCheck { target, .. }
+            | Self::CreateDefaultBranchRuleset { target, .. } => Some(target),
+            Self::SetRepositorySetting { .. }
+            | Self::OpenWorkflowPinPullRequest { .. }
+            | Self::OpenAddEnvrcPullRequest { .. }
+            | Self::SetForkPrApprovalPolicy { .. }
+            | Self::DeleteLegacyBranchProtection { .. } => None,
         }
     }
 }
@@ -375,9 +421,46 @@ impl std::fmt::Display for RepositoryActionUse {
 pub fn plan_repo_fixes(rules: &[Rule], facts: &RepoFacts) -> Vec<PlannedFix> {
     let outputs = evaluate_rules(rules, facts);
 
-    std::iter::zip(rules, &outputs)
+    let mut planned: Vec<PlannedFix> = std::iter::zip(rules, &outputs)
         .filter_map(|(rule, output)| plan_rule_fix(facts, rule, output))
-        .collect()
+        .collect();
+    reconcile_pending_default_branch_target(&mut planned);
+    planned
+}
+
+/// Population planners (RS002/RS012/RS013 and friends) emit fixes targeting the
+/// pending default-branch ruleset whenever no live ruleset covers it, leaving
+/// the actual creation to RS001's `CreateDefaultBranchRuleset` effect. If RS001
+/// is not in the batch — either disabled or already passing — those fixes have
+/// nothing to attach to and must be rejected; otherwise they would silently
+/// pile up state in a ruleset that never gets created.
+fn reconcile_pending_default_branch_target(planned: &mut [PlannedFix]) {
+    let creation_planned = planned.iter().any(|fix| {
+        matches!(
+            &fix.plan,
+            FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset { .. })
+        )
+    });
+    if creation_planned {
+        return;
+    }
+    for fix in planned.iter_mut() {
+        let FixPlan::Effect(effect) = &fix.plan else {
+            continue;
+        };
+        let Some(target) = effect.ruleset_target() else {
+            continue;
+        };
+        if !matches!(target, PlannedRulesetTarget::PendingDefaultBranch { .. }) {
+            continue;
+        }
+        fix.plan = FixPlan::Rejected {
+            reason: "no active branch ruleset applies to the default branch, and RS001 \
+                     (create ruleset) is not in the plan — enable RS001 or create the \
+                     ruleset manually"
+                .to_owned(),
+        };
+    }
 }
 
 pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Vec<RepoFix> {
@@ -425,7 +508,8 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
             FixPlan::Effect(FixEffect::AddRulesetRules { .. })
             | FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods { .. })
             | FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks { .. })
-            | FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck { .. }) => {
+            | FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck { .. })
+            | FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset { .. }) => {
                 match execution
                     .ruleset_updates
                     .iter()
@@ -472,19 +556,6 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
                     }),
                 }
             }
-            FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset { .. }) => {
-                match execution.default_branch_ruleset_creation.as_ref() {
-                    Some(Ok(())) => fix.with_status(FixStatus::Applied),
-                    Some(Err(reason)) => fix.with_status(FixStatus::Failed {
-                        reason: reason.clone(),
-                    }),
-                    None => fix.with_status(FixStatus::Failed {
-                        reason:
-                            "internal error: missing default branch ruleset creation execution result"
-                                .to_owned(),
-                    }),
-                }
-            }
         })
         .collect()
 }
@@ -498,8 +569,6 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
     let mut queued_ruleset_updates = Vec::<QueuedRulesetUpdate>::new();
     let mut fork_pr_approval_policy_to_apply = None::<ForkPrApprovalPolicy>;
     let mut legacy_branch_protection_to_delete = None::<BranchName>;
-    let mut default_branch_ruleset_to_create =
-        None::<QueuedDefaultBranchRulesetCreation>;
     let mut internal_error = None::<String>;
 
     for fix in fixes {
@@ -539,57 +608,38 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     plan: plan.clone(),
                 });
             }
-            FixEffect::AddRulesetRules {
-                ruleset_id,
-                ruleset_name,
-                rules,
-                ..
-            } => {
+            FixEffect::AddRulesetRules { target, rules, .. } => {
                 enqueue_ruleset_update(
                     &mut queued_ruleset_updates,
                     fix.rule_id.clone(),
-                    *ruleset_id,
-                    ruleset_name.clone(),
+                    target.clone(),
                     rules.clone(),
                 );
             }
             FixEffect::SetRulesetPullRequestMergeMethods {
-                ruleset_id,
-                ruleset_name,
-                allowed,
-                ..
+                target, allowed, ..
             } => {
                 enqueue_set_pull_request_merge_methods(
                     &mut queued_ruleset_updates,
                     fix.rule_id.clone(),
-                    *ruleset_id,
-                    ruleset_name.clone(),
+                    target.clone(),
                     allowed.clone(),
                 );
             }
-            FixEffect::SetRulesetStrictRequiredStatusChecks {
-                ruleset_id,
-                ruleset_name,
-                ..
-            } => {
+            FixEffect::SetRulesetStrictRequiredStatusChecks { target, .. } => {
                 enqueue_set_strict_required_status_checks(
                     &mut queued_ruleset_updates,
                     fix.rule_id.clone(),
-                    *ruleset_id,
-                    ruleset_name.clone(),
+                    target.clone(),
                 );
             }
             FixEffect::EnsureRulesetRequiredStatusCheck {
-                ruleset_id,
-                ruleset_name,
-                context,
-                ..
+                target, context, ..
             } => {
                 enqueue_ensure_required_status_check(
                     &mut queued_ruleset_updates,
                     fix.rule_id.clone(),
-                    *ruleset_id,
-                    ruleset_name.clone(),
+                    target.clone(),
                     context.clone(),
                 );
             }
@@ -599,22 +649,12 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             FixEffect::DeleteLegacyBranchProtection { branch, .. } => {
                 legacy_branch_protection_to_delete = Some(branch.clone());
             }
-            FixEffect::CreateDefaultBranchRuleset {
-                default_branch,
-                ruleset_name,
-                ..
-            } => {
-                if default_branch_ruleset_to_create.is_some() && internal_error.is_none() {
-                    internal_error = Some(
-                        "internal error: multiple default-branch ruleset creations planned"
-                            .to_owned(),
-                    );
-                } else {
-                    default_branch_ruleset_to_create = Some(QueuedDefaultBranchRulesetCreation {
-                        default_branch: default_branch.clone(),
-                        ruleset_name: ruleset_name.clone(),
-                    });
-                }
+            FixEffect::CreateDefaultBranchRuleset { target, .. } => {
+                enqueue_ruleset_creation(
+                    &mut queued_ruleset_updates,
+                    fix.rule_id.clone(),
+                    target.clone(),
+                );
             }
         }
     }
@@ -650,9 +690,6 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             legacy_branch_protection_deletion: legacy_branch_protection_to_delete
                 .as_ref()
                 .map(|_| Err(reason.clone())),
-            default_branch_ruleset_creation: default_branch_ruleset_to_create
-                .as_ref()
-                .map(|_| Err(reason.clone())),
         };
     }
 
@@ -686,9 +723,6 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 .as_ref()
                 .map(|_| Err(reason.clone())),
             legacy_branch_protection_deletion: legacy_branch_protection_to_delete
-                .as_ref()
-                .map(|_| Err(reason.clone())),
-            default_branch_ruleset_creation: default_branch_ruleset_to_create
                 .as_ref()
                 .map(|_| Err(reason.clone())),
         };
@@ -755,60 +789,46 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             .map_err(|error| error.to_string())
     });
 
-    let default_branch_ruleset_creation = default_branch_ruleset_to_create.map(|queued| {
-        let repo = repo
-            .as_ref()
-            .expect("repository recorded whenever a ruleset creation effect is present");
-        create_default_branch_ruleset(client, repo, &queued)
-    });
-
     RepoFixExecution {
         repo_settings,
         pull_requests,
         ruleset_updates,
         fork_pr_approval_policy,
         legacy_branch_protection_deletion,
-        default_branch_ruleset_creation,
     }
 }
 
-fn create_default_branch_ruleset(
-    client: &mut GitHubClient,
-    repo: &RepoRef,
-    queued: &QueuedDefaultBranchRulesetCreation,
-) -> Result<(), String> {
-    let body = UpdateRulesetRequest {
-        name: queued.ruleset_name.clone(),
-        target: RulesetTarget::Branch,
-        enforcement: RulesetEnforcement::Active,
-        conditions: Some(RulesetConditions {
-            ref_name: Some(RefNameCondition {
-                include: vec!["~DEFAULT_BRANCH".to_owned()],
-                exclude: Vec::new(),
-            }),
-        }),
-        bypass_actors: Vec::new(),
-        rules: Vec::new(),
-    };
-    client.create_ruleset(repo, &body).map(|_| ()).map_err(|error| {
-        format!(
-            "failed to create ruleset `{}` on `{repo}` covering `{}`: {error}",
-            queued.ruleset_name, queued.default_branch,
-        )
-    })
+fn queued_ruleset_entry_mut<'a>(
+    queue: &'a mut [QueuedRulesetUpdate],
+    target: &PlannedRulesetTarget,
+) -> Option<&'a mut QueuedRulesetUpdate> {
+    queue
+        .iter_mut()
+        .find(|entry| entry.target.merges_with(target))
+}
+
+fn empty_queued_ruleset_update(
+    target: PlannedRulesetTarget,
+    rule_id: RuleId,
+) -> QueuedRulesetUpdate {
+    QueuedRulesetUpdate {
+        target,
+        rule_ids: vec![rule_id],
+        rules_to_add: Vec::new(),
+        set_pull_request_allowed_merge_methods: None,
+        set_strict_required_status_checks: None,
+        add_required_status_check_contexts: Vec::new(),
+        create: false,
+    }
 }
 
 fn enqueue_ruleset_update(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
-    ruleset_id: u64,
-    ruleset_name: String,
+    target: PlannedRulesetTarget,
     rules: Vec<RulesetRule>,
 ) {
-    if let Some(existing) = queue
-        .iter_mut()
-        .find(|entry| entry.ruleset_id == ruleset_id)
-    {
+    if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
         for rule in rules {
             if !existing
@@ -820,88 +840,60 @@ fn enqueue_ruleset_update(
             }
         }
     } else {
-        queue.push(QueuedRulesetUpdate {
-            ruleset_id,
-            ruleset_name,
-            rule_ids: vec![rule_id],
-            rules_to_add: rules,
-            set_pull_request_allowed_merge_methods: None,
-            set_strict_required_status_checks: None,
-            add_required_status_check_contexts: Vec::new(),
-        });
+        let mut entry = empty_queued_ruleset_update(target, rule_id);
+        entry.rules_to_add = rules;
+        queue.push(entry);
     }
 }
 
 fn enqueue_set_pull_request_merge_methods(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
-    ruleset_id: u64,
-    ruleset_name: String,
+    target: PlannedRulesetTarget,
     allowed: Vec<MergeMethod>,
 ) {
-    if let Some(existing) = queue
-        .iter_mut()
-        .find(|entry| entry.ruleset_id == ruleset_id)
-    {
+    if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
         debug_assert!(
             existing.set_pull_request_allowed_merge_methods.is_none(),
-            "duplicate pull-request merge-method update for ruleset {ruleset_id}",
+            "duplicate pull-request merge-method update for ruleset `{}`",
+            target.name(),
         );
         existing.set_pull_request_allowed_merge_methods = Some(allowed);
     } else {
-        queue.push(QueuedRulesetUpdate {
-            ruleset_id,
-            ruleset_name,
-            rule_ids: vec![rule_id],
-            rules_to_add: Vec::new(),
-            set_pull_request_allowed_merge_methods: Some(allowed),
-            set_strict_required_status_checks: None,
-            add_required_status_check_contexts: Vec::new(),
-        });
+        let mut entry = empty_queued_ruleset_update(target, rule_id);
+        entry.set_pull_request_allowed_merge_methods = Some(allowed);
+        queue.push(entry);
     }
 }
 
 fn enqueue_set_strict_required_status_checks(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
-    ruleset_id: u64,
-    ruleset_name: String,
+    target: PlannedRulesetTarget,
 ) {
-    if let Some(existing) = queue
-        .iter_mut()
-        .find(|entry| entry.ruleset_id == ruleset_id)
-    {
+    if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
         debug_assert!(
             existing.set_strict_required_status_checks.is_none(),
-            "duplicate strict-required-status-checks update for ruleset {ruleset_id}",
+            "duplicate strict-required-status-checks update for ruleset `{}`",
+            target.name(),
         );
         existing.set_strict_required_status_checks = Some(true);
     } else {
-        queue.push(QueuedRulesetUpdate {
-            ruleset_id,
-            ruleset_name,
-            rule_ids: vec![rule_id],
-            rules_to_add: Vec::new(),
-            set_pull_request_allowed_merge_methods: None,
-            set_strict_required_status_checks: Some(true),
-            add_required_status_check_contexts: Vec::new(),
-        });
+        let mut entry = empty_queued_ruleset_update(target, rule_id);
+        entry.set_strict_required_status_checks = Some(true);
+        queue.push(entry);
     }
 }
 
 fn enqueue_ensure_required_status_check(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
-    ruleset_id: u64,
-    ruleset_name: String,
+    target: PlannedRulesetTarget,
     context: String,
 ) {
-    if let Some(existing) = queue
-        .iter_mut()
-        .find(|entry| entry.ruleset_id == ruleset_id)
-    {
+    if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
         if !existing
             .add_required_status_check_contexts
@@ -911,15 +903,29 @@ fn enqueue_ensure_required_status_check(
             existing.add_required_status_check_contexts.push(context);
         }
     } else {
-        queue.push(QueuedRulesetUpdate {
-            ruleset_id,
-            ruleset_name,
-            rule_ids: vec![rule_id],
-            rules_to_add: Vec::new(),
-            set_pull_request_allowed_merge_methods: None,
-            set_strict_required_status_checks: None,
-            add_required_status_check_contexts: vec![context],
-        });
+        let mut entry = empty_queued_ruleset_update(target, rule_id);
+        entry.add_required_status_check_contexts.push(context);
+        queue.push(entry);
+    }
+}
+
+fn enqueue_ruleset_creation(
+    queue: &mut Vec<QueuedRulesetUpdate>,
+    rule_id: RuleId,
+    target: PlannedRulesetTarget,
+) {
+    if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
+        existing.rule_ids.push(rule_id);
+        debug_assert!(
+            !existing.create,
+            "duplicate ruleset creation for target `{}`",
+            target.name(),
+        );
+        existing.create = true;
+    } else {
+        let mut entry = empty_queued_ruleset_update(target, rule_id);
+        entry.create = true;
+        queue.push(entry);
     }
 }
 
@@ -928,38 +934,105 @@ fn apply_ruleset_update(
     repo: &RepoRef,
     queued: &QueuedRulesetUpdate,
 ) -> Result<(), String> {
-    let mut ruleset = client
-        .get_ruleset(repo, queued.ruleset_id)
+    match &queued.target {
+        PlannedRulesetTarget::Existing { id, name } => {
+            apply_existing_ruleset_update(client, repo, *id, name, queued)
+        }
+        PlannedRulesetTarget::PendingDefaultBranch {
+            default_branch,
+            name,
+        } => {
+            if !queued.create {
+                return Err(format!(
+                    "automatic fix targeted ruleset `{name}` covering `{default_branch}`, \
+                     but RS001 (create ruleset) is not in the plan — enable RS001 or create \
+                     the ruleset manually",
+                ));
+            }
+            create_default_branch_ruleset(client, repo, default_branch, name, queued)
+        }
+    }
+}
+
+fn apply_existing_ruleset_update(
+    client: &mut GitHubClient,
+    repo: &RepoRef,
+    id: u64,
+    name: &str,
+    queued: &QueuedRulesetUpdate,
+) -> Result<(), String> {
+    let mut ruleset = client.get_ruleset(repo, id).map_err(|error| {
+        format!("failed to fetch ruleset `{name}` (id {id}) from `{repo}`: {error}")
+    })?;
+
+    apply_queued_modifications(&mut ruleset.rules, queued);
+
+    let body = UpdateRulesetRequest::from_ruleset(&ruleset);
+    client
+        .update_ruleset(repo, id, &body)
+        .map(|_| ())
+        .map_err(|error| {
+            format!("failed to update ruleset `{name}` (id {id}) on `{repo}`: {error}")
+        })
+}
+
+fn create_default_branch_ruleset(
+    client: &mut GitHubClient,
+    repo: &RepoRef,
+    default_branch: &BranchName,
+    name: &str,
+    queued: &QueuedRulesetUpdate,
+) -> Result<(), String> {
+    let mut rules: Vec<RulesetRule> = Vec::new();
+    apply_queued_modifications(&mut rules, queued);
+
+    let body = UpdateRulesetRequest {
+        name: name.to_owned(),
+        target: RulesetTarget::Branch,
+        enforcement: RulesetEnforcement::Active,
+        conditions: Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: vec!["~DEFAULT_BRANCH".to_owned()],
+                exclude: Vec::new(),
+            }),
+        }),
+        bypass_actors: Vec::new(),
+        rules,
+    };
+    client
+        .create_ruleset(repo, &body)
+        .map(|_| ())
         .map_err(|error| {
             format!(
-                "failed to fetch ruleset `{}` (id {}) from `{repo}`: {error}",
-                queued.ruleset_name, queued.ruleset_id,
+                "failed to create ruleset `{name}` on `{repo}` covering `{default_branch}`: {error}"
             )
-        })?;
+        })
+}
 
+/// Applies the queued modifications to a ruleset's rule list in place. Used by
+/// both the update (GET-modify-PUT) and create (build-then-POST) paths so the
+/// per-effect merging logic — adding distinct rule kinds, setting parameters
+/// on existing or newly-added `PullRequest` / `RequiredStatusChecks` rules —
+/// is identical regardless of whether the ruleset already exists.
+fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRulesetUpdate) {
     for rule in &queued.rules_to_add {
-        if !ruleset
-            .rules
-            .iter()
-            .any(|existing| existing.kind == rule.kind)
-        {
-            ruleset.rules.push(rule.clone());
+        if !rules.iter().any(|existing| existing.kind == rule.kind) {
+            rules.push(rule.clone());
         }
     }
 
     if let Some(allowed) = &queued.set_pull_request_allowed_merge_methods {
-        let pr_rule = match ruleset
-            .rules
+        let pr_rule = match rules
             .iter_mut()
             .find(|rule| rule.kind == RulesetRuleType::PullRequest)
         {
             Some(rule) => rule,
             None => {
-                ruleset.rules.push(RulesetRule {
+                rules.push(RulesetRule {
                     kind: RulesetRuleType::PullRequest,
                     parameters: None,
                 });
-                ruleset.rules.last_mut().expect("just pushed")
+                rules.last_mut().expect("just pushed")
             }
         };
         let params = pr_rule
@@ -971,18 +1044,17 @@ fn apply_ruleset_update(
     let want_strict = queued.set_strict_required_status_checks == Some(true);
     let want_contexts = !queued.add_required_status_check_contexts.is_empty();
     if want_strict || want_contexts {
-        let status_rule = match ruleset
-            .rules
+        let status_rule = match rules
             .iter_mut()
             .find(|rule| rule.kind == RulesetRuleType::RequiredStatusChecks)
         {
             Some(rule) => rule,
             None => {
-                ruleset.rules.push(RulesetRule {
+                rules.push(RulesetRule {
                     kind: RulesetRuleType::RequiredStatusChecks,
                     parameters: None,
                 });
-                ruleset.rules.last_mut().expect("just pushed")
+                rules.last_mut().expect("just pushed")
             }
         };
         let params = status_rule
@@ -1006,17 +1078,6 @@ fn apply_ruleset_update(
             }
         }
     }
-
-    let body = UpdateRulesetRequest::from_ruleset(&ruleset);
-    client
-        .update_ruleset(repo, queued.ruleset_id, &body)
-        .map(|_| ())
-        .map_err(|error| {
-            format!(
-                "failed to update ruleset `{}` (id {}) on `{repo}`: {error}",
-                queued.ruleset_name, queued.ruleset_id,
-            )
-        })
 }
 
 fn create_workflow_pin_pull_request(
@@ -1422,7 +1483,10 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
 const DEFAULT_BRANCH_RULESET_NAME: &str = "github-infra: default branch protection";
 
 fn plan_create_default_branch_ruleset(facts: &RepoFacts) -> FixPlan {
-    if active_branch_rulesets_for_default_branch(facts).next().is_some() {
+    if active_branch_rulesets_for_default_branch(facts)
+        .next()
+        .is_some()
+    {
         return FixPlan::Rejected {
             reason: "internal error: ruleset creation planned despite an active branch ruleset \
                      already applying to the default branch"
@@ -1432,9 +1496,15 @@ fn plan_create_default_branch_ruleset(facts: &RepoFacts) -> FixPlan {
 
     FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset {
         repo: facts.repo.clone(),
-        default_branch: facts.default_branch.clone(),
-        ruleset_name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+        target: pending_default_branch_target(facts),
     })
+}
+
+fn pending_default_branch_target(facts: &RepoFacts) -> PlannedRulesetTarget {
+    PlannedRulesetTarget::PendingDefaultBranch {
+        default_branch: facts.default_branch.clone(),
+        name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+    }
 }
 
 fn plan_add_ruleset_rule(facts: &RepoFacts, missing: RulesetRuleType) -> FixPlan {
@@ -1443,20 +1513,24 @@ fn plan_add_ruleset_rule(facts: &RepoFacts, missing: RulesetRuleType) -> FixPlan
         .filter(|ruleset| !ruleset.rules.iter().any(|rule| rule.kind == missing))
         .collect::<Vec<_>>();
 
+    let rules = vec![RulesetRule {
+        kind: missing,
+        parameters: None,
+    }];
+
     match candidates.as_slice() {
-        [] => FixPlan::Rejected {
-            reason: format!(
-                "no active branch ruleset applies to the default branch into which `{missing_name}` could be added",
-            ),
-        },
+        [] => FixPlan::Effect(FixEffect::AddRulesetRules {
+            repo: facts.repo.clone(),
+            target: pending_default_branch_target(facts),
+            rules,
+        }),
         [ruleset] => FixPlan::Effect(FixEffect::AddRulesetRules {
             repo: facts.repo.clone(),
-            ruleset_id: ruleset.id,
-            ruleset_name: ruleset.name.clone(),
-            rules: vec![RulesetRule {
-                kind: missing,
-                parameters: None,
-            }],
+            target: PlannedRulesetTarget::Existing {
+                id: ruleset.id,
+                name: ruleset.name.clone(),
+            },
+            rules,
         }),
         many => {
             let names = many
@@ -1496,14 +1570,17 @@ fn plan_set_pull_request_merge_methods(facts: &RepoFacts, allowed: &[MergeMethod
         .collect::<Vec<_>>();
 
     match candidates.as_slice() {
-        [] => FixPlan::Rejected {
-            reason: "no active branch ruleset applies to the default branch on which `pull_request.allowed_merge_methods` could be set"
-                .to_owned(),
-        },
+        [] => FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods {
+            repo: facts.repo.clone(),
+            target: pending_default_branch_target(facts),
+            allowed: allowed.to_vec(),
+        }),
         [ruleset] => FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods {
             repo: facts.repo.clone(),
-            ruleset_id: ruleset.id,
-            ruleset_name: ruleset.name.clone(),
+            target: PlannedRulesetTarget::Existing {
+                id: ruleset.id,
+                name: ruleset.name.clone(),
+            },
             allowed: allowed.to_vec(),
         }),
         many => {
@@ -1541,15 +1618,17 @@ fn plan_ensure_required_status_check(facts: &RepoFacts, context: &str) -> FixPla
         .collect::<Vec<_>>();
 
     match candidates.as_slice() {
-        [] => FixPlan::Rejected {
-            reason: format!(
-                "no active branch ruleset applies to the default branch on which status check `{context}` could be required",
-            ),
-        },
+        [] => FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
+            repo: facts.repo.clone(),
+            target: pending_default_branch_target(facts),
+            context: context.to_owned(),
+        }),
         [ruleset] => FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
             repo: facts.repo.clone(),
-            ruleset_id: ruleset.id,
-            ruleset_name: ruleset.name.clone(),
+            target: PlannedRulesetTarget::Existing {
+                id: ruleset.id,
+                name: ruleset.name.clone(),
+            },
             context: context.to_owned(),
         }),
         many => {
@@ -1586,14 +1665,16 @@ fn plan_set_strict_required_status_checks(facts: &RepoFacts) -> FixPlan {
         .collect::<Vec<_>>();
 
     match candidates.as_slice() {
-        [] => FixPlan::Rejected {
-            reason: "no active branch ruleset applies to the default branch on which `strict_required_status_checks_policy` could be enabled"
-                .to_owned(),
-        },
+        [] => FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
+            repo: facts.repo.clone(),
+            target: pending_default_branch_target(facts),
+        }),
         [ruleset] => FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
             repo: facts.repo.clone(),
-            ruleset_id: ruleset.id,
-            ruleset_name: ruleset.name.clone(),
+            target: PlannedRulesetTarget::Existing {
+                id: ruleset.id,
+                name: ruleset.name.clone(),
+            },
         }),
         many => {
             let names = many
@@ -1613,9 +1694,8 @@ fn plan_set_strict_required_status_checks(facts: &RepoFacts) -> FixPlan {
 fn plan_delete_legacy_branch_protection(facts: &RepoFacts) -> FixPlan {
     let Some(legacy) = facts.legacy_branch_protection.as_ref() else {
         return FixPlan::Rejected {
-            reason:
-                "internal error: no legacy branch protection present despite RS007 failure"
-                    .to_owned(),
+            reason: "internal error: no legacy branch protection present despite RS007 failure"
+                .to_owned(),
         };
     };
 
@@ -2094,15 +2174,15 @@ mod tests {
             by_rule_id["RS001"].plan,
             FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset {
                 repo: facts.repo.clone(),
-                default_branch: BranchName::new("main"),
-                ruleset_name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+                target: PlannedRulesetTarget::PendingDefaultBranch {
+                    default_branch: BranchName::new("main"),
+                    name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+                },
             })
         );
         assert_eq!(
             by_rule_id["RS001"].planned_report().description,
-            format!(
-                "create active branch ruleset `{DEFAULT_BRANCH_RULESET_NAME}` covering `main`",
-            )
+            format!("create active branch ruleset `{DEFAULT_BRANCH_RULESET_NAME}` covering `main`",)
         );
         assert_eq!(
             by_rule_id["WF003"].planned_report().status,
@@ -2131,8 +2211,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset {
                 repo: facts.repo.clone(),
-                default_branch: facts.default_branch.clone(),
-                ruleset_name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+                target: PlannedRulesetTarget::PendingDefaultBranch {
+                    default_branch: facts.default_branch.clone(),
+                    name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+                },
             })
         );
     }
@@ -2140,11 +2222,7 @@ mod tests {
     #[test]
     fn rs001_does_not_plan_when_an_active_ruleset_already_covers_default() {
         let mut facts = base_facts();
-        facts.rulesets = vec![ruleset_for_default_branch(
-            1,
-            "main protection",
-            Vec::new(),
-        )];
+        facts.rulesets = vec![ruleset_for_default_branch(1, "main protection", Vec::new())];
 
         let rules = vec![Rule::new(
             "RS001",
@@ -2909,8 +2987,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::AddRulesetRules {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
                 rules: vec![RulesetRule {
                     kind: RulesetRuleType::RequiredLinearHistory,
                     parameters: None,
@@ -2936,7 +3016,7 @@ mod tests {
                     reason.contains("no active branch ruleset"),
                     "unexpected rejection reason: {reason}"
                 );
-                assert!(reason.contains("required_linear_history"));
+                assert!(reason.contains("RS001"));
             }
             other => panic!("expected rejection, got {other:?}"),
         }
@@ -3167,8 +3247,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
                 allowed: vec![MergeMethod::Squash],
             })
         );
@@ -3198,8 +3280,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
                 allowed: vec![MergeMethod::Squash],
             })
         );
@@ -3218,7 +3302,7 @@ mod tests {
                     reason.contains("no active branch ruleset"),
                     "unexpected rejection reason: {reason}"
                 );
-                assert!(reason.contains("allowed_merge_methods"));
+                assert!(reason.contains("RS001"));
             }
             other => panic!("expected rejection, got {other:?}"),
         }
@@ -3451,8 +3535,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
             })
         );
         assert_eq!(
@@ -3477,8 +3563,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
             })
         );
     }
@@ -3503,8 +3591,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
             })
         );
     }
@@ -3519,9 +3609,10 @@ mod tests {
         match &fixes[0].plan {
             FixPlan::Rejected { reason } => {
                 assert!(
-                    reason.contains("strict_required_status_checks_policy"),
+                    reason.contains("no active branch ruleset"),
                     "unexpected rejection reason: {reason}"
                 );
+                assert!(reason.contains("RS001"));
             }
             other => panic!("expected rejection, got {other:?}"),
         }
@@ -3724,8 +3815,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
                 context: "ci".to_owned(),
             })
         );
@@ -3760,8 +3853,10 @@ mod tests {
             fixes[0].plan,
             FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
                 repo: facts.repo.clone(),
-                ruleset_id: 42,
-                ruleset_name: "main protection".to_owned(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
                 context: "ci".to_owned(),
             })
         );
@@ -3803,10 +3898,10 @@ mod tests {
         match &fixes[0].plan {
             FixPlan::Rejected { reason } => {
                 assert!(
-                    reason.contains("`ci`"),
+                    reason.contains("no active branch ruleset"),
                     "unexpected rejection reason: {reason}"
                 );
-                assert!(reason.contains("no active branch ruleset"));
+                assert!(reason.contains("RS001"));
             }
             other => panic!("expected rejection, got {other:?}"),
         }
@@ -4253,6 +4348,124 @@ mod tests {
                 );
             }
             other => panic!("expected failed status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rs001_plus_rs002_rs013_plan_pending_default_branch_targets() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[rs001_rule(), rs002_rule(), rs013_rule()], &facts);
+
+        let by_rule_id: BTreeMap<_, _> = fixes
+            .iter()
+            .map(|fix| (fix.rule_id.to_string(), fix))
+            .collect();
+
+        assert_eq!(
+            by_rule_id["RS001"].plan,
+            FixPlan::Effect(FixEffect::CreateDefaultBranchRuleset {
+                repo: facts.repo.clone(),
+                target: PlannedRulesetTarget::PendingDefaultBranch {
+                    default_branch: facts.default_branch.clone(),
+                    name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+                },
+            })
+        );
+        assert_eq!(
+            by_rule_id["RS002"].plan,
+            FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
+                repo: facts.repo.clone(),
+                target: PlannedRulesetTarget::PendingDefaultBranch {
+                    default_branch: facts.default_branch.clone(),
+                    name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+                },
+                context: "ci".to_owned(),
+            })
+        );
+        assert_eq!(
+            by_rule_id["RS013"].plan,
+            FixPlan::Effect(FixEffect::SetRulesetStrictRequiredStatusChecks {
+                repo: facts.repo.clone(),
+                target: PlannedRulesetTarget::PendingDefaultBranch {
+                    default_branch: facts.default_branch.clone(),
+                    name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn execute_repo_fixes_batches_rs001_rs002_rs013_into_one_creation_post() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[rs001_rule(), rs002_rule(), rs013_rule()], &facts);
+        assert_eq!(fixes.len(), 3);
+
+        let server = TestServer::spawn(vec![ExpectedRequest::json(
+            "POST",
+            "/repos/example-org/repo/rulesets",
+            |body| {
+                let value: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(value["name"], DEFAULT_BRANCH_RULESET_NAME);
+                assert_eq!(value["target"], "branch");
+                assert_eq!(value["enforcement"], "active");
+                assert_eq!(value["conditions"]["ref_name"]["include"][0], "~DEFAULT_BRANCH");
+
+                let rules = value["rules"].as_array().unwrap();
+                assert_eq!(rules.len(), 1, "expected single required_status_checks rule");
+                assert_eq!(rules[0]["type"], "required_status_checks");
+                let params = &rules[0]["parameters"];
+                assert_eq!(params["strict_required_status_checks_policy"], true);
+                let contexts: BTreeSet<&str> = params["required_status_checks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|check| check["context"].as_str().unwrap())
+                    .collect();
+                assert_eq!(contexts, ["ci"].into_iter().collect());
+            },
+            r#"{"id":99,"name":"github-infra: default branch protection","target":"branch","enforcement":"active"}"#.to_owned(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 3);
+        for fix in &executed {
+            assert_eq!(
+                fix.status,
+                FixStatus::Applied,
+                "rule {} expected Applied, got {:?}",
+                fix.rule_id,
+                fix.status
+            );
+        }
+    }
+
+    #[test]
+    fn population_rules_rejected_when_rs001_absent_and_no_ruleset_exists() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[rs002_rule(), rs013_rule()], &facts);
+
+        assert_eq!(fixes.len(), 2);
+        for fix in &fixes {
+            match &fix.plan {
+                FixPlan::Rejected { reason } => {
+                    assert!(
+                        reason.contains("no active branch ruleset"),
+                        "rule {} unexpected reason: {reason}",
+                        fix.rule_id,
+                    );
+                    assert!(
+                        reason.contains("RS001"),
+                        "rule {} unexpected reason: {reason}",
+                        fix.rule_id,
+                    );
+                }
+                other => panic!("rule {} expected rejection, got {other:?}", fix.rule_id),
+            }
         }
     }
 

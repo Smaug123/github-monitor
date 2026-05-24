@@ -306,7 +306,11 @@ pub(crate) fn legacy_protection_superseded_by_rulesets(
     let rulesets: Vec<&Ruleset> = active_branch_rulesets_for_default_branch(facts).collect();
 
     check_required_status_checks(&legacy.required_status_checks, &rulesets, &mut reasons);
-    check_pull_request_reviews(&legacy.required_pull_request_reviews, &rulesets, &mut reasons);
+    check_pull_request_reviews(
+        &legacy.required_pull_request_reviews,
+        &rulesets,
+        &mut reasons,
+    );
     check_rule_presence(
         legacy.required_linear_history.as_ref(),
         &rulesets,

@@ -2056,7 +2056,9 @@ fn supersedes_rejects_when_no_ruleset_blocks_force_pushes() {
 
     let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
     assert!(
-        reasons.iter().any(|reason| reason.contains("non_fast_forward")),
+        reasons
+            .iter()
+            .any(|reason| reason.contains("non_fast_forward")),
         "reasons: {reasons:?}",
     );
 }
@@ -2131,7 +2133,9 @@ fn supersedes_rejects_enforce_admins_when_ruleset_allows_bypass() {
 
     let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
     assert!(
-        reasons.iter().any(|reason| reason.contains("enforce_admins")),
+        reasons
+            .iter()
+            .any(|reason| reason.contains("enforce_admins")),
         "reasons: {reasons:?}",
     );
 }
@@ -2161,11 +2165,12 @@ fn supersedes_rejects_when_bypass_pull_request_allowances_non_empty() {
         .required_pull_request_reviews
         .as_mut()
         .unwrap()
-        .bypass_pull_request_allowances = Some(crate::github::types::LegacyBypassPullRequestAllowances {
-        users: vec![serde_json::json!({"login": "alice"})],
-        teams: Vec::new(),
-        apps: Vec::new(),
-    });
+        .bypass_pull_request_allowances =
+        Some(crate::github::types::LegacyBypassPullRequestAllowances {
+            users: vec![serde_json::json!({"login": "alice"})],
+            teams: Vec::new(),
+            apps: Vec::new(),
+        });
 
     let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
     assert!(
