@@ -379,15 +379,15 @@ string_enum!(GitTreeEntryType {
     Commit => "commit",
 });
 
-string_enum!(ForkPrWorkflowsPolicy {
-    AllExternalCollaborators => "all_external_collaborators",
+string_enum!(ForkPrApprovalPolicy {
+    AllExternalContributors => "all_external_contributors",
     FirstTimeContributorsNewToGithub => "first_time_contributors_new_to_github",
     FirstTimeContributors => "first_time_contributors",
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ForkPrWorkflowsPermission {
-    pub fork_pr_workflows_policy: ForkPrWorkflowsPolicy,
+pub struct ForkPrApprovalPermission {
+    pub approval_policy: ForkPrApprovalPolicy,
 }
 
 #[cfg(test)]

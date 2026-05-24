@@ -1,4 +1,4 @@
-use crate::github::types::{ForkPrWorkflowsPolicy, MergeMethod};
+use crate::github::types::{ForkPrApprovalPolicy, MergeMethod};
 
 use super::{RepoSetting, Rule, RuleKind, SettingValue};
 
@@ -144,9 +144,9 @@ pub fn default_rules() -> Vec<Rule> {
             "ST007",
             "Fork PR workflows require approval for all external contributors",
             RuleKind::RepoSettingMatch {
-                setting: RepoSetting::ForkPrWorkflowsPolicy,
-                expected: SettingValue::ForkPrWorkflowsPolicy(Some(
-                    ForkPrWorkflowsPolicy::AllExternalCollaborators,
+                setting: RepoSetting::ForkPrApprovalPolicy,
+                expected: SettingValue::ForkPrApprovalPolicy(Some(
+                    ForkPrApprovalPolicy::AllExternalContributors,
                 )),
             },
         ),

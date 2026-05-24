@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
-use crate::github::types::{ForkPrWorkflowsPolicy, MergeMethod};
+use crate::github::types::{ForkPrApprovalPolicy, MergeMethod};
 use crate::types::RuleId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,7 +15,7 @@ pub enum RepoSetting {
     AllowSquashMerge,
     AllowMergeCommit,
     AllowRebaseMerge,
-    ForkPrWorkflowsPolicy,
+    ForkPrApprovalPolicy,
 }
 
 impl RepoSetting {
@@ -30,7 +30,7 @@ impl RepoSetting {
             Self::AllowSquashMerge => "allow_squash_merge",
             Self::AllowMergeCommit => "allow_merge_commit",
             Self::AllowRebaseMerge => "allow_rebase_merge",
-            Self::ForkPrWorkflowsPolicy => "fork_pr_workflows_policy",
+            Self::ForkPrApprovalPolicy => "fork_pr_approval_policy",
         }
     }
 
@@ -57,8 +57,8 @@ impl RepoSetting {
             Self::AllowSquashMerge => SettingValue::Bool(settings.allow_squash_merge),
             Self::AllowMergeCommit => SettingValue::Bool(settings.allow_merge_commit),
             Self::AllowRebaseMerge => SettingValue::Bool(settings.allow_rebase_merge),
-            Self::ForkPrWorkflowsPolicy => {
-                SettingValue::ForkPrWorkflowsPolicy(settings.fork_pr_workflows_policy.clone())
+            Self::ForkPrApprovalPolicy => {
+                SettingValue::ForkPrApprovalPolicy(settings.fork_pr_approval_policy.clone())
             }
         }
     }
@@ -67,22 +67,22 @@ impl RepoSetting {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SettingValue {
     Bool(bool),
-    ForkPrWorkflowsPolicy(Option<ForkPrWorkflowsPolicy>),
+    ForkPrApprovalPolicy(Option<ForkPrApprovalPolicy>),
 }
 
 impl SettingValue {
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Bool(value) => value.to_string(),
-            Self::ForkPrWorkflowsPolicy(Some(policy)) => String::from(policy.clone()),
-            Self::ForkPrWorkflowsPolicy(None) => "unknown".to_owned(),
+            Self::ForkPrApprovalPolicy(Some(policy)) => String::from(policy.clone()),
+            Self::ForkPrApprovalPolicy(None) => "unknown".to_owned(),
         }
     }
 
     pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
-            Self::ForkPrWorkflowsPolicy(_) => None,
+            Self::ForkPrApprovalPolicy(_) => None,
         }
     }
 }

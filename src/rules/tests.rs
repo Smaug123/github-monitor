@@ -7,7 +7,7 @@ use super::workflows::is_commit_sha;
 use super::*;
 use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
-    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrWorkflowsPolicy, MergeMethod,
+    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrApprovalPolicy, MergeMethod,
     RefNameCondition, RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement,
     RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
 };
@@ -41,14 +41,12 @@ fn repo_ref_strategy() -> impl Strategy<Value = RepoRef> {
     (identifier(), identifier()).prop_map(|(owner, name)| RepoRef::new(owner, name))
 }
 
-fn fork_pr_workflows_policy_strategy() -> impl Strategy<Value = Option<ForkPrWorkflowsPolicy>> {
+fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Option<ForkPrApprovalPolicy>> {
     prop_oneof![
         Just(None),
-        Just(Some(ForkPrWorkflowsPolicy::AllExternalCollaborators)),
-        Just(Some(
-            ForkPrWorkflowsPolicy::FirstTimeContributorsNewToGithub
-        )),
-        Just(Some(ForkPrWorkflowsPolicy::FirstTimeContributors)),
+        Just(Some(ForkPrApprovalPolicy::AllExternalContributors)),
+        Just(Some(ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub)),
+        Just(Some(ForkPrApprovalPolicy::FirstTimeContributors)),
     ]
 }
 
@@ -63,7 +61,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
         any::<bool>(),
         any::<bool>(),
         any::<bool>(),
-        fork_pr_workflows_policy_strategy(),
+        fork_pr_approval_policy_strategy(),
     )
         .prop_map(
             |(
@@ -76,7 +74,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
                 allow_squash_merge,
                 allow_merge_commit,
                 allow_rebase_merge,
-                fork_pr_workflows_policy,
+                fork_pr_approval_policy,
             )| RepoSettings {
                 private,
                 archived,
@@ -87,7 +85,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
                 allow_squash_merge,
                 allow_merge_commit,
                 allow_rebase_merge,
-                fork_pr_workflows_policy,
+                fork_pr_approval_policy,
             },
         )
 }
@@ -512,7 +510,7 @@ fn empty_repo_settings() -> RepoSettings {
         allow_squash_merge: false,
         allow_merge_commit: false,
         allow_rebase_merge: false,
-        fork_pr_workflows_policy: None,
+        fork_pr_approval_policy: None,
     }
 }
 

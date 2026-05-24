@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath, RepoPathError};
 use crate::github::types::{
-    BranchProtection, ContentEncoding, ForkPrWorkflowsPolicy, GitTreeEntryType, Repository, Ruleset,
+    BranchProtection, ContentEncoding, ForkPrApprovalPolicy, GitTreeEntryType, Repository, Ruleset,
 };
 use crate::types::{BranchName, RepoRef};
 use crate::workflow::model::Workflow;
@@ -24,13 +24,13 @@ pub struct RepoSettings {
     pub allow_merge_commit: bool,
     pub allow_rebase_merge: bool,
     #[serde(default)]
-    pub fork_pr_workflows_policy: Option<ForkPrWorkflowsPolicy>,
+    pub fork_pr_approval_policy: Option<ForkPrApprovalPolicy>,
 }
 
 impl RepoSettings {
     pub fn new(
         repository: &Repository,
-        fork_pr_workflows_policy: Option<ForkPrWorkflowsPolicy>,
+        fork_pr_approval_policy: Option<ForkPrApprovalPolicy>,
     ) -> Self {
         Self {
             private: repository.private,
@@ -42,7 +42,7 @@ impl RepoSettings {
             allow_squash_merge: repository.allow_squash_merge,
             allow_merge_commit: repository.allow_merge_commit,
             allow_rebase_merge: repository.allow_rebase_merge,
-            fork_pr_workflows_policy,
+            fork_pr_approval_policy,
         }
     }
 }
@@ -71,10 +71,10 @@ pub fn gather_repo_facts(
 ) -> Result<RepoFacts, FactsError> {
     let repository = client.get_repo(&repo)?;
     let default_branch = repository.default_branch.clone();
-    let fork_pr_workflows_policy = client
-        .get_fork_pr_workflows_permission(&repo)?
-        .map(|permission| permission.fork_pr_workflows_policy);
-    let settings = RepoSettings::new(&repository, fork_pr_workflows_policy);
+    let fork_pr_approval_policy = client
+        .get_fork_pr_approval_permission(&repo)?
+        .map(|permission| permission.approval_policy);
+    let settings = RepoSettings::new(&repository, fork_pr_approval_policy);
     let rulesets = fetch_rulesets(client, &repo)?;
     let legacy_branch_protection = client.get_branch_protection(&repo, &default_branch)?;
     let tree = client.get_git_tree(&repo, &default_branch.to_string())?;
@@ -405,15 +405,13 @@ mod tests {
         "[a-z][a-z0-9 _-]{0,20}"
     }
 
-    fn fork_pr_workflows_policy_strategy() -> impl Strategy<Value = Option<ForkPrWorkflowsPolicy>> {
+    fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Option<ForkPrApprovalPolicy>> {
         prop_oneof![
             Just(None),
-            Just(Some(ForkPrWorkflowsPolicy::AllExternalCollaborators)),
-            Just(Some(
-                ForkPrWorkflowsPolicy::FirstTimeContributorsNewToGithub
-            )),
-            Just(Some(ForkPrWorkflowsPolicy::FirstTimeContributors)),
-            "[a-z][a-z0-9_]{0,16}".prop_map(|value| Some(ForkPrWorkflowsPolicy::Unknown(value))),
+            Just(Some(ForkPrApprovalPolicy::AllExternalContributors)),
+            Just(Some(ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub)),
+            Just(Some(ForkPrApprovalPolicy::FirstTimeContributors)),
+            "[a-z][a-z0-9_]{0,16}".prop_map(|value| Some(ForkPrApprovalPolicy::Unknown(value))),
         ]
     }
 
@@ -428,7 +426,7 @@ mod tests {
             any::<bool>(),
             any::<bool>(),
             any::<bool>(),
-            fork_pr_workflows_policy_strategy(),
+            fork_pr_approval_policy_strategy(),
         )
             .prop_map(
                 |(
@@ -441,7 +439,7 @@ mod tests {
                     allow_squash_merge,
                     allow_merge_commit,
                     allow_rebase_merge,
-                    fork_pr_workflows_policy,
+                    fork_pr_approval_policy,
                 )| RepoSettings {
                     private,
                     archived,
@@ -452,7 +450,7 @@ mod tests {
                     allow_squash_merge,
                     allow_merge_commit,
                     allow_rebase_merge,
-                    fork_pr_workflows_policy,
+                    fork_pr_approval_policy,
                 },
             )
     }
@@ -806,7 +804,7 @@ mod tests {
                 allow_squash_merge: true,
                 allow_merge_commit: false,
                 allow_rebase_merge: false,
-                fork_pr_workflows_policy: Some(ForkPrWorkflowsPolicy::AllExternalCollaborators),
+                fork_pr_approval_policy: Some(ForkPrApprovalPolicy::AllExternalContributors),
             },
             legacy_branch_protection: None,
             rulesets: vec![Ruleset {

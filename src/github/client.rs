@@ -15,8 +15,8 @@ use ureq::http::header::HeaderMap;
 use ureq::{Agent, Body, Error as UreqError};
 
 use crate::github::types::{
-    BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, ForkPrWorkflowsPermission,
-    ForkPrWorkflowsPolicy, GitReference, GitTree, PullRequest, Repository, RepositoryContents,
+    BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, ForkPrApprovalPermission,
+    ForkPrApprovalPolicy, GitReference, GitTree, PullRequest, Repository, RepositoryContents,
     RepositoryDirectoryEntry, RepositoryFileContent, RepositoryUpdate, Ruleset,
     UpdateRepositoryFile, UpdateRulesetRequest,
 };
@@ -206,28 +206,28 @@ impl GitHubClient {
         ))
     }
 
-    pub fn get_fork_pr_workflows_permission(
+    pub fn get_fork_pr_approval_permission(
         &mut self,
         repo: &RepoRef,
-    ) -> Result<Option<ForkPrWorkflowsPermission>, GitHubClientError> {
+    ) -> Result<Option<ForkPrApprovalPermission>, GitHubClientError> {
         self.get_json_optional(&format!(
-            "{}/repos/{repo}/actions/permissions/fork-pr-workflows",
+            "{}/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
             self.api_base_url
         ))
     }
 
-    pub fn set_fork_pr_workflows_permission(
+    pub fn set_fork_pr_approval_permission(
         &mut self,
         repo: &RepoRef,
-        policy: &ForkPrWorkflowsPolicy,
+        policy: &ForkPrApprovalPolicy,
     ) -> Result<(), GitHubClientError> {
         self.send_put(
             &format!(
-                "{}/repos/{repo}/actions/permissions/fork-pr-workflows",
+                "{}/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
                 self.api_base_url
             ),
-            &ForkPrWorkflowsPermission {
-                fork_pr_workflows_policy: policy.clone(),
+            &ForkPrApprovalPermission {
+                approval_policy: policy.clone(),
             },
         )?;
         Ok(())

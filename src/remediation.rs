@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::facts::RepoFacts;
 use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath};
 use crate::github::types::{
-    ContentEncoding, CreateGitReference, CreatePullRequest, ForkPrWorkflowsPolicy, PullRequest,
+    ContentEncoding, CreateGitReference, CreatePullRequest, ForkPrApprovalPolicy, PullRequest,
     RepositoryFileContent, RepositoryUpdate, RulesetRule, RulesetRuleType, UpdateRepositoryFile,
     UpdateRulesetRequest,
 };
@@ -63,9 +63,9 @@ pub enum FixEffect {
         ruleset_name: String,
         rules: Vec<RulesetRule>,
     },
-    SetForkPrWorkflowsPolicy {
+    SetForkPrApprovalPolicy {
         repo: RepoRef,
-        policy: ForkPrWorkflowsPolicy,
+        policy: ForkPrApprovalPolicy,
     },
 }
 
@@ -115,7 +115,7 @@ struct RepoFixExecution {
     repo_settings: Option<Result<(), String>>,
     pull_requests: Vec<PullRequestExecution>,
     ruleset_updates: Vec<RulesetUpdateExecution>,
-    fork_pr_workflows_policy: Option<Result<(), String>>,
+    fork_pr_approval_policy: Option<Result<(), String>>,
 }
 
 #[derive(Debug)]
@@ -208,9 +208,9 @@ impl FixEffect {
                     pluralize(rules.len(), "rule", "rules"),
                 )
             }
-            Self::SetForkPrWorkflowsPolicy { policy, .. } => {
+            Self::SetForkPrApprovalPolicy { policy, .. } => {
                 format!(
-                    "set fork PR workflows policy to `{}`",
+                    "set fork PR contributor approval policy to `{}`",
                     String::from(policy.clone())
                 )
             }
@@ -222,7 +222,7 @@ impl FixEffect {
             Self::SetRepositorySetting { repo, .. } => repo,
             Self::OpenWorkflowPinPullRequest { plan } => &plan.repo,
             Self::AddRulesetRules { repo, .. } => repo,
-            Self::SetForkPrWorkflowsPolicy { repo, .. } => repo,
+            Self::SetForkPrApprovalPolicy { repo, .. } => repo,
         }
     }
 }
@@ -341,15 +341,16 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
                     }),
                 }
             }
-            FixPlan::Effect(FixEffect::SetForkPrWorkflowsPolicy { .. }) => {
-                match execution.fork_pr_workflows_policy.as_ref() {
+            FixPlan::Effect(FixEffect::SetForkPrApprovalPolicy { .. }) => {
+                match execution.fork_pr_approval_policy.as_ref() {
                     Some(Ok(())) => fix.with_status(FixStatus::Applied),
                     Some(Err(reason)) => fix.with_status(FixStatus::Failed {
                         reason: reason.clone(),
                     }),
                     None => fix.with_status(FixStatus::Failed {
-                        reason: "internal error: missing fork PR workflows policy execution result"
-                            .to_owned(),
+                        reason:
+                            "internal error: missing fork PR contributor approval policy execution result"
+                                .to_owned(),
                     }),
                 }
             }
@@ -363,7 +364,7 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
     let mut saw_repo_settings = false;
     let mut queued_pull_requests = Vec::new();
     let mut queued_ruleset_updates = Vec::<QueuedRulesetUpdate>::new();
-    let mut fork_pr_workflows_policy_to_apply = None::<ForkPrWorkflowsPolicy>;
+    let mut fork_pr_approval_policy_to_apply = None::<ForkPrApprovalPolicy>;
     let mut internal_error = None::<String>;
 
     for fix in fixes {
@@ -411,8 +412,8 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     rules.clone(),
                 );
             }
-            FixEffect::SetForkPrWorkflowsPolicy { policy, .. } => {
-                fork_pr_workflows_policy_to_apply = Some(policy.clone());
+            FixEffect::SetForkPrApprovalPolicy { policy, .. } => {
+                fork_pr_approval_policy_to_apply = Some(policy.clone());
             }
         }
     }
@@ -434,7 +435,7 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     result: Err(reason.clone()),
                 })
                 .collect(),
-            fork_pr_workflows_policy: fork_pr_workflows_policy_to_apply
+            fork_pr_approval_policy: fork_pr_approval_policy_to_apply
                 .as_ref()
                 .map(|_| Err(reason.clone())),
         };
@@ -458,7 +459,7 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     result: Err(reason.clone()),
                 })
                 .collect(),
-            fork_pr_workflows_policy: fork_pr_workflows_policy_to_apply
+            fork_pr_approval_policy: fork_pr_approval_policy_to_apply
                 .as_ref()
                 .map(|_| Err(reason.clone())),
         };
@@ -501,12 +502,12 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             .collect()
     };
 
-    let fork_pr_workflows_policy = fork_pr_workflows_policy_to_apply.map(|policy| {
+    let fork_pr_approval_policy = fork_pr_approval_policy_to_apply.map(|policy| {
         let repo = repo
             .as_ref()
             .expect("repository recorded whenever a fork-PR policy effect is present");
         client
-            .set_fork_pr_workflows_permission(repo, &policy)
+            .set_fork_pr_approval_permission(repo, &policy)
             .map_err(|error| error.to_string())
     });
 
@@ -514,7 +515,7 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
         repo_settings,
         pull_requests,
         ruleset_updates,
-        fork_pr_workflows_policy,
+        fork_pr_approval_policy,
     }
 }
 
@@ -804,9 +805,9 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
         rule_name: output.name.clone(),
         plan: match &rule.kind {
             RuleKind::RepoSettingMatch {
-                setting: RepoSetting::ForkPrWorkflowsPolicy,
-                expected: SettingValue::ForkPrWorkflowsPolicy(Some(policy)),
-            } => FixPlan::Effect(FixEffect::SetForkPrWorkflowsPolicy {
+                setting: RepoSetting::ForkPrApprovalPolicy,
+                expected: SettingValue::ForkPrApprovalPolicy(Some(policy)),
+            } => FixPlan::Effect(FixEffect::SetForkPrApprovalPolicy {
                 repo: facts.repo.clone(),
                 policy: policy.clone(),
             }),
@@ -1130,7 +1131,7 @@ fn apply_fix_effect_to_repository_update(
         }
         FixEffect::OpenWorkflowPinPullRequest { .. }
         | FixEffect::AddRulesetRules { .. }
-        | FixEffect::SetForkPrWorkflowsPolicy { .. } => None,
+        | FixEffect::SetForkPrApprovalPolicy { .. } => None,
     }
 }
 
@@ -1145,8 +1146,8 @@ fn apply_repo_setting_update(update: &mut RepositoryUpdate, setting: &RepoSettin
         RepoSetting::AllowSquashMerge => update.allow_squash_merge = Some(value),
         RepoSetting::AllowMergeCommit => update.allow_merge_commit = Some(value),
         RepoSetting::AllowRebaseMerge => update.allow_rebase_merge = Some(value),
-        RepoSetting::ForkPrWorkflowsPolicy => {
-            unreachable!("fork PR workflows policy is not configurable via PATCH /repos")
+        RepoSetting::ForkPrApprovalPolicy => {
+            unreachable!("fork PR contributor approval policy is not configurable via PATCH /repos")
         }
     }
 }
@@ -1200,7 +1201,7 @@ mod tests {
                 allow_squash_merge: false,
                 allow_merge_commit: true,
                 allow_rebase_merge: false,
-                fork_pr_workflows_policy: None,
+                fork_pr_approval_policy: None,
             },
             rulesets: Vec::new(),
             legacy_branch_protection: None,
@@ -1272,14 +1273,14 @@ mod tests {
         );
         assert_eq!(
             by_rule_id["ST007"].plan,
-            FixPlan::Effect(FixEffect::SetForkPrWorkflowsPolicy {
+            FixPlan::Effect(FixEffect::SetForkPrApprovalPolicy {
                 repo: facts.repo.clone(),
-                policy: ForkPrWorkflowsPolicy::AllExternalCollaborators,
+                policy: ForkPrApprovalPolicy::AllExternalContributors,
             })
         );
         assert_eq!(
             by_rule_id["ST007"].planned_report().description,
-            "set fork PR workflows policy to `all_external_collaborators`"
+            "set fork PR contributor approval policy to `all_external_contributors`"
         );
         assert!(matches!(
             by_rule_id["WF002"].plan,
@@ -2095,16 +2096,16 @@ mod tests {
             "ST007",
             "Fork PR workflows require approval for all external contributors",
             RuleKind::RepoSettingMatch {
-                setting: RepoSetting::ForkPrWorkflowsPolicy,
-                expected: SettingValue::ForkPrWorkflowsPolicy(Some(
-                    ForkPrWorkflowsPolicy::AllExternalCollaborators,
+                setting: RepoSetting::ForkPrApprovalPolicy,
+                expected: SettingValue::ForkPrApprovalPolicy(Some(
+                    ForkPrApprovalPolicy::AllExternalContributors,
                 )),
             },
         )
     }
 
     #[test]
-    fn execute_repo_fixes_sets_fork_pr_workflows_policy() {
+    fn execute_repo_fixes_sets_fork_pr_approval_policy() {
         let facts = base_facts();
         let fixes = plan_repo_fixes(&[st007_rule()], &facts);
 
@@ -2113,15 +2114,12 @@ mod tests {
             |path| {
                 assert_eq!(
                     path,
-                    "/repos/example-org/repo/actions/permissions/fork-pr-workflows"
+                    "/repos/example-org/repo/actions/permissions/fork-pr-contributor-approval"
                 );
             },
             |body| {
                 let json: serde_json::Value = serde_json::from_str(body).unwrap();
-                assert_eq!(
-                    json["fork_pr_workflows_policy"],
-                    "all_external_collaborators"
-                );
+                assert_eq!(json["approval_policy"], "all_external_contributors");
             },
             204,
             String::new(),
@@ -2138,7 +2136,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_repo_fixes_reports_failure_when_fork_pr_workflows_put_fails() {
+    fn execute_repo_fixes_reports_failure_when_fork_pr_approval_put_fails() {
         let facts = base_facts();
         let fixes = plan_repo_fixes(&[st007_rule()], &facts);
 
@@ -2147,7 +2145,7 @@ mod tests {
             |path| {
                 assert_eq!(
                     path,
-                    "/repos/example-org/repo/actions/permissions/fork-pr-workflows"
+                    "/repos/example-org/repo/actions/permissions/fork-pr-contributor-approval"
                 );
             },
             |_| {},
@@ -2165,7 +2163,7 @@ mod tests {
         match &executed[0].status {
             FixStatus::Failed { reason } => {
                 assert!(
-                    reason.contains("fork-pr-workflows"),
+                    reason.contains("fork-pr-contributor-approval"),
                     "unexpected failure reason: {reason}"
                 );
             }
