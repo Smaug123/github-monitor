@@ -1224,6 +1224,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         .map(|output| (output.id.to_string(), result_tag(&output.result)))
         .collect::<BTreeMap<_, _>>();
     let expected = BTreeMap::from([
+        ("FL001".to_owned(), "pass"),
         ("NX001".to_owned(), "pass"),
         ("NX002".to_owned(), "skip"),
         ("RS001".to_owned(), "pass"),
@@ -1264,6 +1265,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         .map(|output| (output.id.to_string(), result_tag(&output.result)))
         .collect::<BTreeMap<_, _>>();
     let expected = BTreeMap::from([
+        ("FL001".to_owned(), "fail"),
         ("NX001".to_owned(), "fail"),
         ("NX002".to_owned(), "fail"),
         ("RS001".to_owned(), "fail"),

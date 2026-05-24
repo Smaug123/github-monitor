@@ -113,6 +113,7 @@
     }
   ],
   "files_present": [
+    ".envrc",
     ".github/workflows/ci.yml",
     "CODEOWNERS",
     "flake.lock",

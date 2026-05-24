@@ -157,5 +157,12 @@ pub fn default_rules() -> Vec<Rule> {
                 name: "main".to_owned(),
             },
         ),
+        Rule::new(
+            "FL001",
+            "`.envrc` exists",
+            RuleKind::FileExists {
+                path: ".envrc".to_owned(),
+            },
+        ),
     ]
 }
