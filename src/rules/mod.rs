@@ -25,6 +25,11 @@ pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
         | RuleKind::RulesetEnforcesAdmins
         | RuleKind::RulesetRequiresLinearHistory
         | RuleKind::RulesetPreventsForcePush
+        | RuleKind::RulesetRestrictsDeletions
+        | RuleKind::RulesetRequiresSignedCommits
+        | RuleKind::RulesetRequiresPullRequest
+        | RuleKind::RulesetRestrictsMergeMethods { .. }
+        | RuleKind::RulesetRequiresStrictStatusChecks
         | RuleKind::UsesRulesetsNotLegacyProtection => rulesets::evaluate(kind, facts),
         RuleKind::WorkflowExistsForDefaultBranch
         | RuleKind::WorkflowHasJob { .. }

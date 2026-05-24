@@ -1,4 +1,4 @@
-use crate::github::types::ForkPrWorkflowsPolicy;
+use crate::github::types::{ForkPrWorkflowsPolicy, MergeMethod};
 
 use super::{RepoSetting, Rule, RuleKind, SettingValue};
 
@@ -31,6 +31,40 @@ pub fn default_rules() -> Vec<Rule> {
             "RS007",
             "Repository uses rulesets instead of legacy protection",
             RuleKind::UsesRulesetsNotLegacyProtection,
+        ),
+        Rule::new(
+            "RS008",
+            "Rulesets restrict deletions",
+            RuleKind::RulesetRestrictsDeletions,
+        ),
+        Rule::new(
+            "RS009",
+            "Rulesets require signed commits",
+            RuleKind::RulesetRequiresSignedCommits,
+        ),
+        Rule::new(
+            "RS010",
+            "Rulesets require a pull request before merging",
+            RuleKind::RulesetRequiresPullRequest,
+        ),
+        Rule::new(
+            "RS011",
+            "Pull-request rule allows only squash merges",
+            RuleKind::RulesetRestrictsMergeMethods {
+                allowed: vec![MergeMethod::Squash],
+            },
+        ),
+        Rule::new(
+            "RS012",
+            "all-required-checks-complete status check is required",
+            RuleKind::RulesetRequiresStatusCheck {
+                check_name: "all-required-checks-complete".to_owned(),
+            },
+        ),
+        Rule::new(
+            "RS013",
+            "Branches must be up-to-date before merging",
+            RuleKind::RulesetRequiresStrictStatusChecks,
         ),
         Rule::new(
             "WF001",

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
-use crate::github::types::ForkPrWorkflowsPolicy;
+use crate::github::types::{ForkPrWorkflowsPolicy, MergeMethod};
 use crate::types::RuleId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +96,13 @@ pub enum RuleKind {
     RulesetEnforcesAdmins,
     RulesetRequiresLinearHistory,
     RulesetPreventsForcePush,
+    RulesetRestrictsDeletions,
+    RulesetRequiresSignedCommits,
+    RulesetRequiresPullRequest,
+    RulesetRestrictsMergeMethods {
+        allowed: Vec<MergeMethod>,
+    },
+    RulesetRequiresStrictStatusChecks,
     UsesRulesetsNotLegacyProtection,
     WorkflowExistsForDefaultBranch,
     WorkflowHasJob {

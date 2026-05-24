@@ -1,7 +1,9 @@
 use crate::facts::RepoFacts;
+use std::collections::BTreeSet;
+
 use crate::github::types::{
-    BypassActor, BypassActorType, RefNameCondition, Ruleset, RulesetConditions, RulesetEnforcement,
-    RulesetRuleType, RulesetTarget,
+    BypassActor, BypassActorType, MergeMethod, RefNameCondition, Ruleset, RulesetConditions,
+    RulesetEnforcement, RulesetRuleType, RulesetTarget,
 };
 
 use super::glob::branch_pattern_matches;
@@ -71,6 +73,21 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
         RuleKind::RulesetPreventsForcePush => {
             ruleset_rule_presence_result(facts, RulesetRuleType::NonFastForward, "non_fast_forward")
         }
+        RuleKind::RulesetRestrictsDeletions => {
+            ruleset_rule_presence_result(facts, RulesetRuleType::Deletion, "deletion")
+        }
+        RuleKind::RulesetRequiresSignedCommits => ruleset_rule_presence_result(
+            facts,
+            RulesetRuleType::RequiredSignatures,
+            "required_signatures",
+        ),
+        RuleKind::RulesetRequiresPullRequest => {
+            ruleset_rule_presence_result(facts, RulesetRuleType::PullRequest, "pull_request")
+        }
+        RuleKind::RulesetRestrictsMergeMethods { allowed } => {
+            evaluate_allowed_merge_methods(facts, allowed)
+        }
+        RuleKind::RulesetRequiresStrictStatusChecks => evaluate_strict_status_checks(facts),
         RuleKind::UsesRulesetsNotLegacyProtection => {
             if facts.legacy_branch_protection.is_some() {
                 RuleResult::Fail {
@@ -155,6 +172,88 @@ fn forbidden_bypass_actor_name(actor: &BypassActor) -> Option<&'static str> {
         BypassActorType::RepositoryRole => Some("RepositoryRole"),
         _ => None,
     }
+}
+
+fn evaluate_allowed_merge_methods(facts: &RepoFacts, required: &[MergeMethod]) -> RuleResult {
+    if !has_active_branch_ruleset_for_default_branch(facts) {
+        return RuleResult::Fail {
+            reason: "no active branch ruleset was found".to_owned(),
+        };
+    }
+
+    let required_set = merge_method_set(required);
+    let required_text = describe_merge_method_set(&required_set);
+
+    let mut saw_pull_request_rule = false;
+    for ruleset in active_branch_rulesets_for_default_branch(facts) {
+        for rule in &ruleset.rules {
+            if rule.kind != RulesetRuleType::PullRequest {
+                continue;
+            }
+            saw_pull_request_rule = true;
+            let actual = rule
+                .parameters
+                .as_ref()
+                .map(|parameters| merge_method_set(&parameters.allowed_merge_methods))
+                .unwrap_or_default();
+            if actual == required_set {
+                return RuleResult::Pass;
+            }
+        }
+    }
+
+    let reason = if saw_pull_request_rule {
+        format!(
+            "no active branch ruleset's `pull_request` rule restricts `allowed_merge_methods` to {required_text}",
+        )
+    } else {
+        format!(
+            "no active branch ruleset contains a `pull_request` rule restricting `allowed_merge_methods` to {required_text}",
+        )
+    };
+    RuleResult::Fail { reason }
+}
+
+fn merge_method_set(methods: &[MergeMethod]) -> BTreeSet<String> {
+    methods
+        .iter()
+        .map(|method| String::from(method.clone()))
+        .collect()
+}
+
+fn evaluate_strict_status_checks(facts: &RepoFacts) -> RuleResult {
+    if !has_active_branch_ruleset_for_default_branch(facts) {
+        return RuleResult::Fail {
+            reason: "no active branch ruleset was found".to_owned(),
+        };
+    }
+
+    let strict = active_branch_rulesets_for_default_branch(facts)
+        .flat_map(|ruleset| ruleset.rules.iter())
+        .filter(|rule| rule.kind == RulesetRuleType::RequiredStatusChecks)
+        .any(|rule| {
+            rule.parameters
+                .as_ref()
+                .and_then(|parameters| parameters.strict_required_status_checks_policy)
+                .unwrap_or(false)
+        });
+
+    if strict {
+        RuleResult::Pass
+    } else {
+        RuleResult::Fail {
+            reason: "no active branch ruleset requires branches to be up-to-date before merging"
+                .to_owned(),
+        }
+    }
+}
+
+fn describe_merge_method_set(methods: &BTreeSet<String>) -> String {
+    let names = methods
+        .iter()
+        .map(|method| format!("`{method}`"))
+        .collect::<Vec<_>>();
+    format!("[{}]", names.join(", "))
 }
 
 fn ruleset_rule_presence_result(

@@ -248,6 +248,8 @@ pub struct RulesetRuleParameters {
     pub dismiss_stale_reviews_on_push: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub do_not_enforce_on_create: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_merge_methods: Vec<MergeMethod>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +344,12 @@ string_enum!(BypassMode {
     PullRequest => "pull_request",
 });
 
+string_enum!(MergeMethod {
+    Merge => "merge",
+    Squash => "squash",
+    Rebase => "rebase",
+});
+
 string_enum!(RulesetRuleType {
     Creation => "creation",
     Update => "update",
@@ -422,7 +430,8 @@ mod tests {
       "type": "pull_request",
       "parameters": {
         "required_approving_review_count": 2,
-        "require_code_owner_review": true
+        "require_code_owner_review": true,
+        "allowed_merge_methods": ["squash"]
       }
     }
   ]
@@ -435,6 +444,12 @@ mod tests {
         assert_eq!(ruleset.enforcement, RulesetEnforcement::Active);
         assert_eq!(ruleset.rules.len(), 2);
         assert_eq!(ruleset.rules[0].kind, RulesetRuleType::RequiredStatusChecks);
+        assert_eq!(ruleset.rules[1].kind, RulesetRuleType::PullRequest);
+        let pull_request_parameters = ruleset.rules[1].parameters.as_ref().unwrap();
+        assert_eq!(
+            pull_request_parameters.allowed_merge_methods,
+            vec![MergeMethod::Squash]
+        );
         let conditions = ruleset.conditions.unwrap();
         let ref_name = conditions.ref_name.unwrap();
         assert_eq!(ref_name.include, vec!["~DEFAULT_BRANCH"]);

@@ -34,6 +34,9 @@
             "required_status_checks": [
               {
                 "context": "ci"
+              },
+              {
+                "context": "all-required-checks-complete"
               }
             ],
             "strict_required_status_checks_policy": true
@@ -44,7 +47,8 @@
           "parameters": {
             "required_approving_review_count": 2,
             "require_code_owner_review": true,
-            "required_review_thread_resolution": true
+            "required_review_thread_resolution": true,
+            "allowed_merge_methods": ["squash"]
           }
         },
         {
@@ -52,6 +56,12 @@
         },
         {
           "type": "non_fast_forward"
+        },
+        {
+          "type": "deletion"
+        },
+        {
+          "type": "required_signatures"
         }
       ]
     }

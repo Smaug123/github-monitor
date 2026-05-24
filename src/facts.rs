@@ -385,7 +385,7 @@ impl std::error::Error for SnapshotError {
 mod tests {
     use super::*;
     use crate::github::types::{
-        BranchProtection, BypassActor, BypassActorType, BypassMode, RefNameCondition,
+        BranchProtection, BypassActor, BypassActorType, BypassMode, MergeMethod, RefNameCondition,
         RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
         RulesetRuleParameters, RulesetRuleType, RulesetTarget,
     };
@@ -522,6 +522,14 @@ mod tests {
         })
     }
 
+    fn merge_method_strategy() -> impl Strategy<Value = MergeMethod> {
+        prop_oneof![
+            Just(MergeMethod::Merge),
+            Just(MergeMethod::Squash),
+            Just(MergeMethod::Rebase),
+        ]
+    }
+
     fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParameters> {
         (
             proptest::collection::vec(required_status_check_strategy(), 0..3),
@@ -532,6 +540,7 @@ mod tests {
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<bool>()),
+            proptest::collection::vec(merge_method_strategy(), 0..4),
         )
             .prop_map(
                 |(
@@ -543,6 +552,7 @@ mod tests {
                     required_review_thread_resolution,
                     dismiss_stale_reviews_on_push,
                     do_not_enforce_on_create,
+                    allowed_merge_methods,
                 )| RulesetRuleParameters {
                     required_status_checks,
                     strict_required_status_checks_policy,
@@ -552,6 +562,7 @@ mod tests {
                     required_review_thread_resolution,
                     dismiss_stale_reviews_on_push,
                     do_not_enforce_on_create,
+                    allowed_merge_methods,
                 },
             )
     }
@@ -824,6 +835,7 @@ mod tests {
                         required_review_thread_resolution: None,
                         dismiss_stale_reviews_on_push: None,
                         do_not_enforce_on_create: None,
+                        allowed_merge_methods: Vec::new(),
                     }),
                 }],
             }],

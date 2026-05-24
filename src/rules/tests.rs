@@ -7,7 +7,7 @@ use super::workflows::is_commit_sha;
 use super::*;
 use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
-    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrWorkflowsPolicy,
+    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrWorkflowsPolicy, MergeMethod,
     RefNameCondition, RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement,
     RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
 };
@@ -151,6 +151,7 @@ fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParame
         proptest::option::of(any::<bool>()),
         proptest::option::of(any::<bool>()),
         proptest::option::of(any::<bool>()),
+        proptest::collection::vec(merge_method_strategy(), 0..4),
     )
         .prop_map(
             |(
@@ -162,6 +163,7 @@ fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParame
                 required_review_thread_resolution,
                 dismiss_stale_reviews_on_push,
                 do_not_enforce_on_create,
+                allowed_merge_methods,
             )| RulesetRuleParameters {
                 required_status_checks,
                 strict_required_status_checks_policy,
@@ -171,8 +173,17 @@ fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParame
                 required_review_thread_resolution,
                 dismiss_stale_reviews_on_push,
                 do_not_enforce_on_create,
+                allowed_merge_methods,
             },
         )
+}
+
+fn merge_method_strategy() -> impl Strategy<Value = MergeMethod> {
+    prop_oneof![
+        Just(MergeMethod::Merge),
+        Just(MergeMethod::Squash),
+        Just(MergeMethod::Rebase),
+    ]
 }
 
 fn ruleset_rule_strategy() -> impl Strategy<Value = RulesetRule> {
@@ -393,6 +404,12 @@ fn rule_kind_strategy() -> impl Strategy<Value = RuleKind> {
         Just(RuleKind::RulesetEnforcesAdmins),
         Just(RuleKind::RulesetRequiresLinearHistory),
         Just(RuleKind::RulesetPreventsForcePush),
+        Just(RuleKind::RulesetRestrictsDeletions),
+        Just(RuleKind::RulesetRequiresSignedCommits),
+        Just(RuleKind::RulesetRequiresPullRequest),
+        proptest::collection::vec(merge_method_strategy(), 0..4)
+            .prop_map(|allowed| RuleKind::RulesetRestrictsMergeMethods { allowed }),
+        Just(RuleKind::RulesetRequiresStrictStatusChecks),
         Just(RuleKind::UsesRulesetsNotLegacyProtection),
         Just(RuleKind::WorkflowExistsForDefaultBranch),
         identifier().prop_map(|job_name| RuleKind::WorkflowHasJob { job_name }),
@@ -1215,6 +1232,12 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("RS005".to_owned(), "pass"),
         ("RS006".to_owned(), "pass"),
         ("RS007".to_owned(), "pass"),
+        ("RS008".to_owned(), "pass"),
+        ("RS009".to_owned(), "pass"),
+        ("RS010".to_owned(), "pass"),
+        ("RS011".to_owned(), "pass"),
+        ("RS012".to_owned(), "pass"),
+        ("RS013".to_owned(), "pass"),
         ("ST001".to_owned(), "pass"),
         ("ST002".to_owned(), "pass"),
         ("ST003".to_owned(), "pass"),
@@ -1249,6 +1272,12 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("RS005".to_owned(), "fail"),
         ("RS006".to_owned(), "fail"),
         ("RS007".to_owned(), "fail"),
+        ("RS008".to_owned(), "fail"),
+        ("RS009".to_owned(), "fail"),
+        ("RS010".to_owned(), "fail"),
+        ("RS011".to_owned(), "fail"),
+        ("RS012".to_owned(), "fail"),
+        ("RS013".to_owned(), "fail"),
         ("ST001".to_owned(), "fail"),
         ("ST002".to_owned(), "fail"),
         ("ST003".to_owned(), "fail"),
@@ -1317,6 +1346,7 @@ fn ruleset_requires_status_check_passes_when_check_exists() {
             required_review_thread_resolution: None,
             dismiss_stale_reviews_on_push: None,
             do_not_enforce_on_create: None,
+            allowed_merge_methods: Vec::new(),
         }),
     }])];
 
@@ -1631,4 +1661,232 @@ fn ruleset_without_conditions_is_treated_as_applying() {
     facts.rulesets = vec![ruleset];
 
     assert_eq!(evaluate(&RuleKind::RulesetExists, &facts), RuleResult::Pass);
+}
+
+fn pull_request_rule_with_methods(methods: Vec<MergeMethod>) -> RulesetRule {
+    RulesetRule {
+        kind: RulesetRuleType::PullRequest,
+        parameters: Some(RulesetRuleParameters {
+            allowed_merge_methods: methods,
+            ..RulesetRuleParameters::default()
+        }),
+    }
+}
+
+fn required_status_checks_rule(strict: Option<bool>) -> RulesetRule {
+    RulesetRule {
+        kind: RulesetRuleType::RequiredStatusChecks,
+        parameters: Some(RulesetRuleParameters {
+            required_status_checks: vec![RequiredStatusCheck {
+                context: "ci".to_owned(),
+                integration_id: None,
+            }],
+            strict_required_status_checks_policy: strict,
+            ..RulesetRuleParameters::default()
+        }),
+    }
+}
+
+#[test]
+fn ruleset_restricts_deletions_passes_when_rule_present() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
+        kind: RulesetRuleType::Deletion,
+        parameters: None,
+    }])];
+
+    assert_eq!(
+        evaluate(&RuleKind::RulesetRestrictsDeletions, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn ruleset_restricts_deletions_fails_when_rule_absent() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(Vec::new())];
+
+    assert!(matches!(
+        evaluate(&RuleKind::RulesetRestrictsDeletions, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_restricts_deletions_fails_when_no_active_ruleset() {
+    let facts = base_facts();
+
+    assert!(matches!(
+        evaluate(&RuleKind::RulesetRestrictsDeletions, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_requires_signed_commits_passes_when_rule_present() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
+        kind: RulesetRuleType::RequiredSignatures,
+        parameters: None,
+    }])];
+
+    assert_eq!(
+        evaluate(&RuleKind::RulesetRequiresSignedCommits, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn ruleset_requires_signed_commits_fails_when_rule_absent() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(Vec::new())];
+
+    assert!(matches!(
+        evaluate(&RuleKind::RulesetRequiresSignedCommits, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_requires_pull_request_passes_when_rule_present() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![pull_request_rule_with_methods(
+        Vec::new(),
+    )])];
+
+    assert_eq!(
+        evaluate(&RuleKind::RulesetRequiresPullRequest, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn ruleset_requires_pull_request_fails_when_rule_absent() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(Vec::new())];
+
+    assert!(matches!(
+        evaluate(&RuleKind::RulesetRequiresPullRequest, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_restricts_merge_methods_passes_when_set_matches_exactly() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![pull_request_rule_with_methods(
+        vec![MergeMethod::Squash],
+    )])];
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::RulesetRestrictsMergeMethods {
+                allowed: vec![MergeMethod::Squash],
+            },
+            &facts,
+        ),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn ruleset_restricts_merge_methods_is_set_equality_not_subset() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![pull_request_rule_with_methods(
+        vec![MergeMethod::Squash, MergeMethod::Merge],
+    )])];
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::RulesetRestrictsMergeMethods {
+                allowed: vec![MergeMethod::Squash],
+            },
+            &facts,
+        ),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_restricts_merge_methods_fails_when_empty_allow_all_default() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![pull_request_rule_with_methods(
+        Vec::new(),
+    )])];
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::RulesetRestrictsMergeMethods {
+                allowed: vec![MergeMethod::Squash],
+            },
+            &facts,
+        ),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_restricts_merge_methods_fails_without_pull_request_rule() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(Vec::new())];
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::RulesetRestrictsMergeMethods {
+                allowed: vec![MergeMethod::Squash],
+            },
+            &facts,
+        ),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_requires_strict_status_checks_passes_with_strict_true() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![required_status_checks_rule(
+        Some(true),
+    )])];
+
+    assert_eq!(
+        evaluate(&RuleKind::RulesetRequiresStrictStatusChecks, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn ruleset_requires_strict_status_checks_fails_with_strict_false() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![required_status_checks_rule(
+        Some(false),
+    )])];
+
+    assert!(matches!(
+        evaluate(&RuleKind::RulesetRequiresStrictStatusChecks, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_requires_strict_status_checks_fails_with_strict_none() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![required_status_checks_rule(
+        None,
+    )])];
+
+    assert!(matches!(
+        evaluate(&RuleKind::RulesetRequiresStrictStatusChecks, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_requires_strict_status_checks_fails_without_required_status_checks_rule() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(Vec::new())];
+
+    assert!(matches!(
+        evaluate(&RuleKind::RulesetRequiresStrictStatusChecks, &facts),
+        RuleResult::Fail { .. }
+    ));
 }

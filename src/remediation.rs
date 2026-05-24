@@ -829,6 +829,15 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             RuleKind::RulesetRequiresLinearHistory => {
                 plan_add_ruleset_rule(facts, RulesetRuleType::RequiredLinearHistory)
             }
+            RuleKind::RulesetRestrictsDeletions => {
+                plan_add_ruleset_rule(facts, RulesetRuleType::Deletion)
+            }
+            RuleKind::RulesetRequiresSignedCommits => {
+                plan_add_ruleset_rule(facts, RulesetRuleType::RequiredSignatures)
+            }
+            RuleKind::RulesetRequiresPullRequest => {
+                plan_add_ruleset_rule(facts, RulesetRuleType::PullRequest)
+            }
             _ => FixPlan::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
             },
@@ -1252,7 +1261,7 @@ mod tests {
             .map(|fix| (fix.rule_id.to_string(), fix))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(fixes.len(), 18);
+        assert_eq!(fixes.len(), 24);
         assert_eq!(
             by_rule_id["ST001"].plan,
             FixPlan::Effect(FixEffect::SetRepositorySetting {
