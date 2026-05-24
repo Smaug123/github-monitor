@@ -21,3 +21,13 @@ jobs:
 
       - name: Test
         run: nix develop --command cargo test
+
+  all-required-checks-complete:
+    needs: [build-and-test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: G-Research/common-actions/check-required-lite@2b7dc49cb14f3344fbe6019c14a31165e258c059
+        with:
+          needs-context: ${{ toJSON(needs) }}
+
