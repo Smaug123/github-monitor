@@ -23,8 +23,9 @@ use crate::github::types::{
 use crate::types::{BranchName, RepoRef};
 
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
-const GITHUB_API_VERSION: &str = "2022-11-28";
-const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+pub(crate) const GITHUB_API_VERSION: &str = "2022-11-28";
+pub(crate) const USER_AGENT: &str =
+    concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 const RATE_LIMIT_BUFFER: u32 = 5;
 const MAX_RETRIES: u32 = 3;
 const INITIAL_RETRY_BACKOFF_MS: u64 = 250;
