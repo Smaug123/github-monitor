@@ -7,9 +7,9 @@ use super::workflows::is_commit_sha;
 use super::*;
 use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
-    BypassActor, BypassActorType, BypassMode, RefNameCondition, RequiredStatusCheck, Ruleset,
-    RulesetConditions, RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType,
-    RulesetTarget,
+    BranchProtection, BypassActor, BypassActorType, BypassMode, RefNameCondition,
+    RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
+    RulesetRuleParameters, RulesetRuleType, RulesetTarget,
 };
 use crate::types::{BranchName, RepoRef, RuleId};
 use crate::workflow::model::{
@@ -328,15 +328,25 @@ fn repo_facts_strategy() -> impl Strategy<Value = RepoFacts> {
         repo_ref_strategy(),
         repo_settings_strategy(),
         proptest::collection::vec(ruleset_strategy(), 0..4),
+        proptest::option::of(Just(BranchProtection::default())),
         identifier(),
         proptest::collection::vec(workflow_file_strategy(), 0..4),
         proptest::collection::btree_set(path_fragment(), 0..8),
     )
         .prop_map(
-            |(repo, settings, rulesets, default_branch, workflows, files_present)| RepoFacts {
+            |(
                 repo,
                 settings,
                 rulesets,
+                legacy_branch_protection,
+                default_branch,
+                workflows,
+                files_present,
+            )| RepoFacts {
+                repo,
+                settings,
+                rulesets,
+                legacy_branch_protection,
                 default_branch: BranchName::new(default_branch),
                 workflows,
                 files_present,
@@ -477,6 +487,7 @@ fn base_facts() -> RepoFacts {
         repo: RepoRef::new("example", "repo"),
         settings: empty_repo_settings(),
         rulesets: Vec::new(),
+        legacy_branch_protection: None,
         default_branch: BranchName::new("main"),
         workflows: Vec::new(),
         files_present: BTreeSet::new(),
@@ -722,6 +733,7 @@ proptest! {
             repo,
             settings,
             rulesets: Vec::new(),
+            legacy_branch_protection: None,
             default_branch: BranchName::new(default_branch),
             workflows,
             files_present,
@@ -953,12 +965,23 @@ fn nix_flake_has_check_passes_when_workflow_runs_nix_flake_check() {
 }
 
 #[test]
-fn uses_rulesets_not_legacy_protection_skips_until_facts_include_legacy_state() {
+fn uses_rulesets_not_legacy_protection_passes_when_default_branch_has_no_legacy_protection() {
     let facts = base_facts();
+
+    assert_eq!(
+        evaluate(&RuleKind::UsesRulesetsNotLegacyProtection, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn uses_rulesets_not_legacy_protection_fails_when_legacy_protection_present() {
+    let mut facts = base_facts();
+    facts.legacy_branch_protection = Some(BranchProtection::default());
 
     assert!(matches!(
         evaluate(&RuleKind::UsesRulesetsNotLegacyProtection, &facts),
-        RuleResult::Skip { .. }
+        RuleResult::Fail { .. }
     ));
 }
 
@@ -1138,7 +1161,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("RS004".to_owned(), "pass"),
         ("RS005".to_owned(), "pass"),
         ("RS006".to_owned(), "pass"),
-        ("RS007".to_owned(), "skip"),
+        ("RS007".to_owned(), "pass"),
         ("ST001".to_owned(), "pass"),
         ("ST002".to_owned(), "pass"),
         ("ST003".to_owned(), "pass"),
@@ -1169,7 +1192,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("RS004".to_owned(), "fail"),
         ("RS005".to_owned(), "fail"),
         ("RS006".to_owned(), "fail"),
-        ("RS007".to_owned(), "skip"),
+        ("RS007".to_owned(), "fail"),
         ("ST001".to_owned(), "fail"),
         ("ST002".to_owned(), "fail"),
         ("ST003".to_owned(), "fail"),

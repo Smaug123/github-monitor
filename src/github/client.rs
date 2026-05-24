@@ -15,11 +15,11 @@ use ureq::http::header::HeaderMap;
 use ureq::{Agent, Body, Error as UreqError};
 
 use crate::github::types::{
-    CommitRef, CreateGitReference, CreatePullRequest, GitReference, GitTree, PullRequest,
-    Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
+    BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, GitReference, GitTree,
+    PullRequest, Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
     RepositoryUpdate, Ruleset, UpdateRepositoryFile,
 };
-use crate::types::RepoRef;
+use crate::types::{BranchName, RepoRef};
 
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
@@ -181,6 +181,18 @@ impl GitHubClient {
         ))
     }
 
+    pub fn get_branch_protection(
+        &mut self,
+        repo: &RepoRef,
+        branch: &BranchName,
+    ) -> Result<Option<BranchProtection>, GitHubClientError> {
+        let encoded_branch = percent_encode_path_segment(&branch.to_string());
+        self.get_json_optional(&format!(
+            "{}/repos/{repo}/branches/{encoded_branch}/protection",
+            self.api_base_url
+        ))
+    }
+
     pub fn update_repository(
         &mut self,
         repo: &RepoRef,
@@ -317,6 +329,17 @@ impl GitHubClient {
                 url: url.to_owned(),
                 source,
             })
+    }
+
+    fn get_json_optional<T>(&mut self, url: &str) -> Result<Option<T>, GitHubClientError>
+    where
+        T: DeserializeOwned,
+    {
+        match self.get_json(url) {
+            Ok(value) => Ok(Some(value)),
+            Err(GitHubClientError::UnexpectedStatus { status: 404, .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
     }
 
     fn get_paginated_json<T>(&mut self, first_page_url: &str) -> Result<Vec<T>, GitHubClientError>
@@ -1024,6 +1047,60 @@ mod tests {
             .unwrap_err();
 
         assert_unexpected_status(error, 500);
+    }
+
+    #[test]
+    fn get_branch_protection_returns_none_for_404() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/branches/main/protection",
+            404,
+            r#"{"message":"Branch not protected"}"#,
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let protection = client
+            .get_branch_protection(&RepoRef::new("owner", "repo"), &BranchName::new("main"))
+            .unwrap();
+
+        assert_eq!(protection, None);
+    }
+
+    #[test]
+    fn get_branch_protection_returns_some_for_200() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/branches/main/protection",
+            200,
+            r#"{"url":"https://api.github.com/repos/owner/repo/branches/main/protection","required_linear_history":{"enabled":true}}"#,
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let protection = client
+            .get_branch_protection(&RepoRef::new("owner", "repo"), &BranchName::new("main"))
+            .unwrap();
+
+        assert_eq!(protection, Some(BranchProtection::default()));
+    }
+
+    #[test]
+    fn get_branch_protection_percent_encodes_branch_name() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/branches/release%2Fv1/protection",
+            404,
+            "{}",
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let protection = client
+            .get_branch_protection(
+                &RepoRef::new("owner", "repo"),
+                &BranchName::new("release/v1"),
+            )
+            .unwrap();
+
+        assert_eq!(protection, None);
     }
 
     #[test]

@@ -917,6 +917,7 @@ mod tests {
                 allow_rebase_merge: false,
             },
             rulesets: Vec::new(),
+            legacy_branch_protection: None,
             default_branch: BranchName::new("main"),
             workflows: Vec::new(),
             files_present: BTreeSet::new(),
@@ -974,7 +975,7 @@ mod tests {
             .map(|fix| (fix.rule_id.to_string(), fix))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(fixes.len(), 15);
+        assert_eq!(fixes.len(), 16);
         assert_eq!(
             by_rule_id["ST001"].plan,
             FixPlan::Effect(FixEffect::SetRepositorySetting {

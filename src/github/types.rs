@@ -233,6 +233,14 @@ pub struct RequiredStatusCheck {
     pub integration_id: Option<u64>,
 }
 
+// Marker for the presence of legacy (pre-rulesets) branch protection on a
+// specific branch. The GitHub branch-protection endpoint returns a large
+// structured body whose fields none of the current rules consume; presence is
+// the entire signal. Unknown fields deserialize into nothing here, which is
+// exactly what we want — extend with named fields when a rule needs them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchProtection {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryFileContent {
     pub name: String,
@@ -396,6 +404,32 @@ mod tests {
         let ref_name = conditions.ref_name.unwrap();
         assert_eq!(ref_name.include, vec!["~DEFAULT_BRANCH"]);
         assert!(ref_name.exclude.is_empty());
+    }
+
+    #[test]
+    fn deserializes_branch_protection_payload_ignoring_unknown_fields() {
+        let protection: BranchProtection = serde_json::from_str(
+            r#"
+{
+  "url": "https://api.github.com/repos/example/example/branches/main/protection",
+  "required_status_checks": {
+    "url": "https://api.github.com/repos/example/example/branches/main/protection/required_status_checks",
+    "strict": true,
+    "contexts": ["ci"]
+  },
+  "enforce_admins": {
+    "url": "https://api.github.com/repos/example/example/branches/main/protection/enforce_admins",
+    "enabled": true
+  },
+  "required_linear_history": {"enabled": true},
+  "allow_force_pushes": {"enabled": false}
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(protection, BranchProtection::default());
+        assert_eq!(serde_json::to_string(&protection).unwrap(), "{}");
     }
 
     #[test]

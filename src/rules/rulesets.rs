@@ -71,9 +71,16 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
         RuleKind::RulesetPreventsForcePush => {
             ruleset_rule_presence_result(facts, RulesetRuleType::NonFastForward, "non_fast_forward")
         }
-        RuleKind::UsesRulesetsNotLegacyProtection => RuleResult::Skip {
-            reason: "RepoFacts does not record legacy branch protection state, so this rule cannot yet distinguish rulesets from legacy protection".to_owned(),
-        },
+        RuleKind::UsesRulesetsNotLegacyProtection => {
+            if facts.legacy_branch_protection.is_some() {
+                RuleResult::Fail {
+                    reason: "legacy branch protection is configured on the default branch"
+                        .to_owned(),
+                }
+            } else {
+                RuleResult::Pass
+            }
+        }
         _ => unreachable!("non-ruleset rule passed to rulesets::evaluate"),
     }
 }

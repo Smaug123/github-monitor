@@ -6,7 +6,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath, RepoPathError};
-use crate::github::types::{ContentEncoding, GitTreeEntryType, Repository, Ruleset};
+use crate::github::types::{
+    BranchProtection, ContentEncoding, GitTreeEntryType, Repository, Ruleset,
+};
 use crate::types::{BranchName, RepoRef};
 use crate::workflow::model::Workflow;
 
@@ -50,6 +52,8 @@ pub struct RepoFacts {
     pub repo: RepoRef,
     pub settings: RepoSettings,
     pub rulesets: Vec<Ruleset>,
+    #[serde(default)]
+    pub legacy_branch_protection: Option<BranchProtection>,
     pub default_branch: BranchName,
     pub workflows: Vec<WorkflowFile>,
     pub files_present: BTreeSet<String>,
@@ -63,6 +67,7 @@ pub fn gather_repo_facts(
     let default_branch = repository.default_branch.clone();
     let settings = RepoSettings::from(&repository);
     let rulesets = fetch_rulesets(client, &repo)?;
+    let legacy_branch_protection = client.get_branch_protection(&repo, &default_branch)?;
     let tree = client.get_git_tree(&repo, &default_branch.to_string())?;
 
     if tree.truncated {
@@ -84,6 +89,7 @@ pub fn gather_repo_facts(
         repo,
         settings,
         rulesets,
+        legacy_branch_protection,
         default_branch,
         workflows,
         files_present,
@@ -370,9 +376,9 @@ impl std::error::Error for SnapshotError {
 mod tests {
     use super::*;
     use crate::github::types::{
-        BypassActor, BypassActorType, BypassMode, RefNameCondition, RequiredStatusCheck, Ruleset,
-        RulesetConditions, RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType,
-        RulesetTarget,
+        BranchProtection, BypassActor, BypassActorType, BypassMode, RefNameCondition,
+        RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
+        RulesetRuleParameters, RulesetRuleType, RulesetTarget,
     };
     use crate::workflow::model::{
         ActionRef, ActionReference, ActionStep, Job, RunStep, Step, StepKind, TriggerFilter,
@@ -694,15 +700,26 @@ mod tests {
             identifier(),
             repo_settings_strategy(),
             proptest::collection::vec(ruleset_strategy(), 0..3),
+            proptest::option::of(Just(BranchProtection::default())),
             identifier(),
             proptest::collection::vec(workflow_file_strategy(), 0..3),
             proptest::collection::btree_set("[./A-Za-z0-9_-]{1,40}", 0..10),
         )
             .prop_map(
-                |(owner, name, settings, rulesets, branch, workflows, files_present)| RepoFacts {
+                |(
+                    owner,
+                    name,
+                    settings,
+                    rulesets,
+                    legacy_branch_protection,
+                    branch,
+                    workflows,
+                    files_present,
+                )| RepoFacts {
                     repo: RepoRef::new(owner, name),
                     settings,
                     rulesets,
+                    legacy_branch_protection,
                     default_branch: BranchName::new(branch),
                     workflows,
                     files_present,
@@ -755,6 +772,7 @@ mod tests {
                 allow_merge_commit: false,
                 allow_rebase_merge: false,
             },
+            legacy_branch_protection: None,
             rulesets: vec![Ruleset {
                 id: 1,
                 name: "main protection".to_owned(),

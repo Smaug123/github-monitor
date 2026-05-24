@@ -16,6 +16,7 @@
   },
   "rulesets": [],
   "default_branch": "main",
+  "legacy_branch_protection": {},
   "workflows": [
     {
       "path": ".github/workflows/unsafe.yml",
