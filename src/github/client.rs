@@ -1194,7 +1194,7 @@ mod tests {
                 &UpdateRepositoryFile {
                     message: "Pin actions".to_owned(),
                     content: "Y29udGVudA==".to_owned(),
-                    sha: "blobsha".to_owned(),
+                    sha: Some("blobsha".to_owned()),
                     branch: "topic".to_owned(),
                 },
             )

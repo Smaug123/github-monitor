@@ -125,7 +125,9 @@ pub struct CreateGitReference {
 pub struct UpdateRepositoryFile {
     pub message: String,
     pub content: String,
-    pub sha: String,
+    /// SHA of the blob to replace. Omit when creating a new file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
     pub branch: String,
 }
 
@@ -564,13 +566,28 @@ mod tests {
         let update = UpdateRepositoryFile {
             message: "Pin actions".to_owned(),
             content: "Y29udGVudA==".to_owned(),
-            sha: "abc123".to_owned(),
+            sha: Some("abc123".to_owned()),
             branch: "topic".to_owned(),
         };
 
         assert_eq!(
             serde_json::to_string(&update).unwrap(),
             r#"{"message":"Pin actions","content":"Y29udGVudA==","sha":"abc123","branch":"topic"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_create_repository_file_payload_without_sha() {
+        let create = UpdateRepositoryFile {
+            message: "Add .envrc".to_owned(),
+            content: "dXNlIGZsYWtlCg==".to_owned(),
+            sha: None,
+            branch: "topic".to_owned(),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&create).unwrap(),
+            r#"{"message":"Add .envrc","content":"dXNlIGZsYWtlCg==","branch":"topic"}"#
         );
     }
 

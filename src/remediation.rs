@@ -56,6 +56,9 @@ pub enum FixEffect {
     OpenWorkflowPinPullRequest {
         plan: WorkflowPinPullRequestPlan,
     },
+    OpenAddEnvrcPullRequest {
+        plan: AddEnvrcPullRequestPlan,
+    },
     AddRulesetRules {
         repo: RepoRef,
         ruleset_id: u64,
@@ -80,6 +83,15 @@ pub(crate) struct WorkflowPinPullRequestPlan {
     default_branch: BranchName,
     workflows: Vec<WorkflowFilePins>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddEnvrcPullRequestPlan {
+    repo: RepoRef,
+    default_branch: BranchName,
+}
+
+const ENVRC_PATH: &str = ".envrc";
+const ENVRC_CONTENTS: &str = "use flake\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkflowFilePins {
@@ -142,6 +154,12 @@ struct QueuedPullRequest {
 }
 
 #[derive(Debug, Clone)]
+struct QueuedEnvrcPullRequest {
+    rule_id: RuleId,
+    plan: AddEnvrcPullRequestPlan,
+}
+
+#[derive(Debug, Clone)]
 struct QueuedRulesetUpdate {
     ruleset_id: u64,
     ruleset_name: String,
@@ -198,6 +216,9 @@ impl FixEffect {
                     pluralize(file_count, "file", "files"),
                 )
             }
+            Self::OpenAddEnvrcPullRequest { .. } => {
+                format!("open a pull request that adds `{ENVRC_PATH}` with `use flake`")
+            }
             Self::AddRulesetRules {
                 ruleset_name,
                 rules,
@@ -241,6 +262,7 @@ impl FixEffect {
         match self {
             Self::SetRepositorySetting { repo, .. } => repo,
             Self::OpenWorkflowPinPullRequest { plan } => &plan.repo,
+            Self::OpenAddEnvrcPullRequest { plan } => &plan.repo,
             Self::AddRulesetRules { repo, .. } => repo,
             Self::SetRulesetPullRequestMergeMethods { repo, .. } => repo,
             Self::SetForkPrApprovalPolicy { repo, .. } => repo,
@@ -321,7 +343,8 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
                     }),
                 }
             }
-            FixPlan::Effect(FixEffect::OpenWorkflowPinPullRequest { .. }) => {
+            FixPlan::Effect(FixEffect::OpenWorkflowPinPullRequest { .. })
+            | FixPlan::Effect(FixEffect::OpenAddEnvrcPullRequest { .. }) => {
                 match execution
                     .pull_requests
                     .iter()
@@ -385,6 +408,7 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
     let mut update = RepositoryUpdate::default();
     let mut saw_repo_settings = false;
     let mut queued_pull_requests = Vec::new();
+    let mut queued_envrc_pull_requests = Vec::<QueuedEnvrcPullRequest>::new();
     let mut queued_ruleset_updates = Vec::<QueuedRulesetUpdate>::new();
     let mut fork_pr_approval_policy_to_apply = None::<ForkPrApprovalPolicy>;
     let mut internal_error = None::<String>;
@@ -416,6 +440,12 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             }
             FixEffect::OpenWorkflowPinPullRequest { plan } => {
                 queued_pull_requests.push(QueuedPullRequest {
+                    rule_id: fix.rule_id.clone(),
+                    plan: plan.clone(),
+                });
+            }
+            FixEffect::OpenAddEnvrcPullRequest { plan } => {
+                queued_envrc_pull_requests.push(QueuedEnvrcPullRequest {
                     rule_id: fix.rule_id.clone(),
                     plan: plan.clone(),
                 });
@@ -463,6 +493,14 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     rule_id: queued.rule_id,
                     result: Err(reason.clone()),
                 })
+                .chain(
+                    queued_envrc_pull_requests
+                        .into_iter()
+                        .map(|queued| PullRequestExecution {
+                            rule_id: queued.rule_id,
+                            result: Err(reason.clone()),
+                        }),
+                )
                 .collect(),
             ruleset_updates: queued_ruleset_updates
                 .into_iter()
@@ -487,6 +525,14 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     rule_id: queued.rule_id,
                     result: Err(reason.clone()),
                 })
+                .chain(
+                    queued_envrc_pull_requests
+                        .into_iter()
+                        .map(|queued| PullRequestExecution {
+                            rule_id: queued.rule_id,
+                            result: Err(reason.clone()),
+                        }),
+                )
                 .collect(),
             ruleset_updates: queued_ruleset_updates
                 .into_iter()
@@ -515,13 +561,19 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
         None
     };
 
-    let pull_requests = queued_pull_requests
+    let mut pull_requests = queued_pull_requests
         .into_iter()
         .map(|queued| PullRequestExecution {
             rule_id: queued.rule_id,
             result: create_workflow_pin_pull_request(client, &queued.plan),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    pull_requests.extend(queued_envrc_pull_requests.into_iter().map(|queued| {
+        PullRequestExecution {
+            rule_id: queued.rule_id,
+            result: create_add_envrc_pull_request(client, &queued.plan),
+        }
+    }));
 
     let ruleset_updates = if queued_ruleset_updates.is_empty() {
         Vec::new()
@@ -717,7 +769,7 @@ fn create_workflow_pin_pull_request(
                 message: format!("Pin GitHub Actions to commit SHAs in {}", update.path),
                 content: base64::engine::general_purpose::STANDARD
                     .encode(update.content.as_bytes()),
-                sha: update.sha.clone(),
+                sha: Some(update.sha.clone()),
                 branch: branch_name.clone(),
             },
         ) {
@@ -760,6 +812,125 @@ fn create_workflow_pin_pull_request(
                 }
             }
         }
+    }
+}
+
+fn create_add_envrc_pull_request(
+    client: &mut GitHubClient,
+    plan: &AddEnvrcPullRequestPlan,
+) -> Result<PullRequest, String> {
+    let branch_name = add_envrc_branch_name();
+    let base_sha = client
+        .resolve_commit_sha(&plan.repo, &plan.repo, &plan.default_branch.to_string())
+        .map_err(|error| {
+            format!(
+                "failed to resolve base branch `{}` for `{}`: {error}",
+                plan.default_branch, plan.repo
+            )
+        })?;
+
+    client
+        .create_git_reference(
+            &plan.repo,
+            &CreateGitReference {
+                reference: format!("refs/heads/{branch_name}"),
+                sha: base_sha,
+            },
+        )
+        .map_err(|error| {
+            format!(
+                "failed to create branch `{branch_name}` in `{}`: {error}",
+                plan.repo
+            )
+        })?;
+
+    let path = NonRootRepoPath::new(ENVRC_PATH)
+        .map_err(|error| format!("`{ENVRC_PATH}` is not a valid repository path: {error}"))?;
+
+    if let Err(error) = client.update_file_contents(
+        &plan.repo,
+        &path,
+        &UpdateRepositoryFile {
+            message: format!("Add `{ENVRC_PATH}`"),
+            content: base64::engine::general_purpose::STANDARD.encode(ENVRC_CONTENTS.as_bytes()),
+            sha: None,
+            branch: branch_name.clone(),
+        },
+    ) {
+        let failure = format!(
+            "failed to create `{ENVRC_PATH}` in `{}`: {error}",
+            plan.repo
+        );
+        return Err(cleanup_failed_add_envrc_branch(
+            client,
+            plan,
+            &branch_name,
+            failure,
+        ));
+    }
+
+    match client.create_pull_request(
+        &plan.repo,
+        &CreatePullRequest {
+            title: add_envrc_pull_request_title(),
+            head: branch_name.clone(),
+            base: plan.default_branch.to_string(),
+            body: add_envrc_pull_request_body(),
+        },
+    ) {
+        Ok(pull_request) => Ok(pull_request),
+        Err(error) => {
+            let failure = format!(
+                "failed to open pull request that adds `{ENVRC_PATH}` in `{}`: {error}",
+                plan.repo
+            );
+
+            match error {
+                GitHubClientError::UnexpectedStatus { .. } => Err(cleanup_failed_add_envrc_branch(
+                    client,
+                    plan,
+                    &branch_name,
+                    failure,
+                )),
+                GitHubClientError::Request { .. } | GitHubClientError::Auth { .. } => Err(failure),
+                GitHubClientError::UnexpectedContentsShape { .. } => {
+                    unreachable!("pull request creation does not use repository contents endpoints")
+                }
+            }
+        }
+    }
+}
+
+fn add_envrc_pull_request_title() -> String {
+    format!("Add `{ENVRC_PATH}`")
+}
+
+fn add_envrc_pull_request_body() -> String {
+    format!(
+        "Generated by github-infra.\n\nAdds `{ENVRC_PATH}` containing `use flake` so the Nix devshell is loaded automatically by direnv.",
+    )
+}
+
+fn add_envrc_branch_name() -> String {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("github-infra/add-envrc-{suffix}")
+}
+
+fn cleanup_failed_add_envrc_branch(
+    client: &mut GitHubClient,
+    plan: &AddEnvrcPullRequestPlan,
+    branch_name: &str,
+    failure: String,
+) -> String {
+    match client.delete_git_reference(&plan.repo, &format!("heads/{branch_name}")) {
+        Ok(()) => failure,
+        Err(cleanup_error) => format!(
+            "{failure}; additionally failed to delete temporary branch `{branch_name}` in `{}`: {cleanup_error}",
+            plan.repo
+        ),
     }
 }
 
@@ -927,6 +1098,14 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             }
             RuleKind::RulesetRestrictsMergeMethods { allowed } => {
                 plan_set_pull_request_merge_methods(facts, allowed)
+            }
+            RuleKind::FileExists { path } if path == ENVRC_PATH => {
+                FixPlan::Effect(FixEffect::OpenAddEnvrcPullRequest {
+                    plan: AddEnvrcPullRequestPlan {
+                        repo: facts.repo.clone(),
+                        default_branch: facts.default_branch.clone(),
+                    },
+                })
             }
             _ => FixPlan::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
@@ -1296,6 +1475,7 @@ fn apply_fix_effect_to_repository_update(
             None
         }
         FixEffect::OpenWorkflowPinPullRequest { .. }
+        | FixEffect::OpenAddEnvrcPullRequest { .. }
         | FixEffect::AddRulesetRules { .. }
         | FixEffect::SetRulesetPullRequestMergeMethods { .. }
         | FixEffect::SetForkPrApprovalPolicy { .. } => None,
@@ -2828,6 +3008,227 @@ mod tests {
                     reason.contains("fork-pr-contributor-approval"),
                     "unexpected failure reason: {reason}"
                 );
+            }
+            other => panic!("expected failed status, got {other:?}"),
+        }
+    }
+
+    fn fl001_rule() -> Rule {
+        Rule::new(
+            "FL001",
+            "`.envrc` exists",
+            RuleKind::FileExists {
+                path: ENVRC_PATH.to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn add_envrc_fix_is_planned_when_envrc_missing() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::OpenAddEnvrcPullRequest {
+                plan: AddEnvrcPullRequestPlan {
+                    repo: facts.repo.clone(),
+                    default_branch: facts.default_branch.clone(),
+                },
+            })
+        );
+        assert_eq!(
+            fixes[0].planned_report().description,
+            "open a pull request that adds `.envrc` with `use flake`"
+        );
+    }
+
+    #[test]
+    fn add_envrc_fix_not_planned_when_envrc_present() {
+        let mut facts = base_facts();
+        facts.files_present.insert(ENVRC_PATH.to_owned());
+
+        let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
+
+        assert!(
+            fixes.is_empty(),
+            "expected no fixes (rule passes), got {fixes:?}"
+        );
+    }
+
+    #[test]
+    fn file_exists_rule_for_other_path_is_rejected() {
+        let facts = base_facts();
+        let rule = Rule::new(
+            "FL999",
+            "`CODEOWNERS` exists",
+            RuleKind::FileExists {
+                path: "CODEOWNERS".to_owned(),
+            },
+        );
+
+        let fixes = plan_repo_fixes(&[rule], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert!(matches!(fixes[0].plan, FixPlan::Rejected { .. }));
+    }
+
+    #[test]
+    fn execute_repo_fixes_opens_pull_request_for_add_envrc() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
+        let default_branch_sha = "fedcba9876543210fedcba9876543210fedcba98";
+        let expected_envrc_content =
+            base64::engine::general_purpose::STANDARD.encode(b"use flake\n");
+        let expected_envrc_content_for_assert = expected_envrc_content.clone();
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/commits/main",
+                |_| {},
+                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/repo/git/refs",
+                move |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(json["sha"], default_branch_sha);
+                    assert!(
+                        json["ref"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("refs/heads/github-infra/add-envrc-")
+                    );
+                },
+                r#"{"ref":"refs/heads/topic","object":{"sha":"abc123","type":"commit"}}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/contents/.envrc",
+                move |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(json["content"], expected_envrc_content_for_assert);
+                    assert!(
+                        json.get("sha").is_none(),
+                        "PUT body for new file must omit sha; got {body}"
+                    );
+                    assert!(
+                        json["branch"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("github-infra/add-envrc-")
+                    );
+                    assert_eq!(json["message"], "Add `.envrc`");
+                },
+                "{}".to_owned(),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/repo/pulls",
+                move |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(json["title"], "Add `.envrc`");
+                    assert_eq!(json["base"], "main");
+                    assert!(
+                        json["head"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("github-infra/add-envrc-")
+                    );
+                    assert!(json["body"].as_str().unwrap().contains("use flake"));
+                },
+                r#"{"number":99,"html_url":"https://example.test/pr/99"}"#.to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_deletes_temporary_branch_after_envrc_pull_request_failure() {
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
+        let default_branch_sha = "fedcba9876543210fedcba9876543210fedcba98";
+        let branch_name = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let delete_branch_name = branch_name.clone();
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/commits/main",
+                |_| {},
+                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/repo/git/refs",
+                {
+                    let branch_name = branch_name.clone();
+                    move |body| {
+                        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                        let reference = json["ref"].as_str().unwrap();
+                        let branch = reference.strip_prefix("refs/heads/").unwrap().to_owned();
+                        *branch_name.lock().unwrap() = Some(branch);
+                    }
+                },
+                r#"{"ref":"refs/heads/topic","object":{"sha":"abc123","type":"commit"}}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/contents/.envrc",
+                |_| {},
+                "{}".to_owned(),
+            ),
+            ExpectedRequest::with_status_and_path_assertion(
+                "POST",
+                |path| assert_eq!(path, "/repos/example-org/repo/pulls"),
+                |_| {},
+                500,
+                "{}".to_owned(),
+            ),
+            ExpectedRequest::with_status_and_path_assertion(
+                "DELETE",
+                move |path| {
+                    let branch = delete_branch_name
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("branch name should have been captured");
+                    assert_eq!(
+                        path,
+                        format!("/repos/example-org/repo/git/refs/heads/{branch}")
+                    );
+                },
+                |_| {},
+                204,
+                String::new(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        match &executed[0].status {
+            FixStatus::Failed { reason } => {
+                assert!(
+                    reason.contains("failed to open pull request that adds `.envrc`"),
+                    "unexpected failure reason: {reason}"
+                );
+                assert!(!reason.contains("failed to delete temporary branch"));
             }
             other => panic!("expected failed status, got {other:?}"),
         }
