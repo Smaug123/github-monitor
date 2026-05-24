@@ -16,8 +16,9 @@ use ureq::{Agent, Body, Error as UreqError};
 
 use crate::github::types::{
     BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, ForkPrWorkflowsPermission,
-    GitReference, GitTree, PullRequest, Repository, RepositoryContents, RepositoryDirectoryEntry,
-    RepositoryFileContent, RepositoryUpdate, Ruleset, UpdateRepositoryFile, UpdateRulesetRequest,
+    ForkPrWorkflowsPolicy, GitReference, GitTree, PullRequest, Repository, RepositoryContents,
+    RepositoryDirectoryEntry, RepositoryFileContent, RepositoryUpdate, Ruleset,
+    UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::types::{BranchName, RepoRef};
 
@@ -213,6 +214,23 @@ impl GitHubClient {
             "{}/repos/{repo}/actions/permissions/fork-pr-workflows",
             self.api_base_url
         ))
+    }
+
+    pub fn set_fork_pr_workflows_permission(
+        &mut self,
+        repo: &RepoRef,
+        policy: &ForkPrWorkflowsPolicy,
+    ) -> Result<(), GitHubClientError> {
+        self.send_put(
+            &format!(
+                "{}/repos/{repo}/actions/permissions/fork-pr-workflows",
+                self.api_base_url
+            ),
+            &ForkPrWorkflowsPermission {
+                fork_pr_workflows_policy: policy.clone(),
+            },
+        )?;
+        Ok(())
     }
 
     pub fn update_repository(
