@@ -85,7 +85,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     }
 }
 
-fn active_branch_rulesets_for_default_branch<'a>(
+pub(crate) fn active_branch_rulesets_for_default_branch<'a>(
     facts: &'a RepoFacts,
 ) -> impl Iterator<Item = &'a Ruleset> + 'a {
     let default_branch = facts.default_branch.to_string();

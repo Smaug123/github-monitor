@@ -176,6 +176,30 @@ pub struct Ruleset {
     pub rules: Vec<RulesetRule>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpdateRulesetRequest {
+    pub name: String,
+    pub target: RulesetTarget,
+    pub enforcement: RulesetEnforcement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<RulesetConditions>,
+    pub bypass_actors: Vec<BypassActor>,
+    pub rules: Vec<RulesetRule>,
+}
+
+impl UpdateRulesetRequest {
+    pub fn from_ruleset(ruleset: &Ruleset) -> Self {
+        Self {
+            name: ruleset.name.clone(),
+            target: ruleset.target.clone(),
+            enforcement: ruleset.enforcement.clone(),
+            conditions: ruleset.conditions.clone(),
+            bypass_actors: ruleset.bypass_actors.clone(),
+            rules: ruleset.rules.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesetConditions {
     #[serde(default, skip_serializing_if = "Option::is_none")]

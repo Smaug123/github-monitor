@@ -17,7 +17,7 @@ use ureq::{Agent, Body, Error as UreqError};
 use crate::github::types::{
     BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, GitReference, GitTree,
     PullRequest, Repository, RepositoryContents, RepositoryDirectoryEntry, RepositoryFileContent,
-    RepositoryUpdate, Ruleset, UpdateRepositoryFile,
+    RepositoryUpdate, Ruleset, UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::types::{BranchName, RepoRef};
 
@@ -179,6 +179,18 @@ impl GitHubClient {
             "{}/repos/{repo}/rulesets/{ruleset_id}",
             self.api_base_url
         ))
+    }
+
+    pub fn update_ruleset(
+        &mut self,
+        repo: &RepoRef,
+        ruleset_id: u64,
+        update: &UpdateRulesetRequest,
+    ) -> Result<Ruleset, GitHubClientError> {
+        self.put_json(
+            &format!("{}/repos/{repo}/rulesets/{ruleset_id}", self.api_base_url),
+            update,
+        )
     }
 
     pub fn get_branch_protection(
