@@ -206,11 +206,15 @@ pub struct RulesetConditions {
     pub ref_name: Option<RefNameCondition>,
 }
 
+// GitHub's PUT /repos/{owner}/{repo}/rulesets/{ruleset_id} endpoint requires
+// both `include` and `exclude` to be present whenever `ref_name` is sent —
+// omitting either yields a 422 "Missing required parameter" response — so we
+// always serialize them, even when empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefNameCondition {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub include: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub exclude: Vec<String>,
 }
 
@@ -497,6 +501,35 @@ mod tests {
         .unwrap();
 
         assert!(ruleset.conditions.is_none());
+    }
+
+    #[test]
+    fn update_ruleset_request_always_serializes_ref_name_include_and_exclude() {
+        let ruleset = Ruleset {
+            id: 42,
+            name: "main".to_owned(),
+            target: RulesetTarget::Branch,
+            enforcement: RulesetEnforcement::Active,
+            conditions: Some(RulesetConditions {
+                ref_name: Some(RefNameCondition {
+                    include: vec!["~DEFAULT_BRANCH".to_owned()],
+                    exclude: Vec::new(),
+                }),
+            }),
+            bypass_actors: Vec::new(),
+            rules: Vec::new(),
+        };
+
+        let body = UpdateRulesetRequest::from_ruleset(&ruleset);
+        let json: serde_json::Value = serde_json::to_value(&body).unwrap();
+        let ref_name = &json["conditions"]["ref_name"];
+
+        assert_eq!(ref_name["include"], serde_json::json!(["~DEFAULT_BRANCH"]));
+        assert_eq!(
+            ref_name["exclude"],
+            serde_json::json!([]),
+            "GitHub's update-ruleset endpoint rejects requests with `exclude` omitted",
+        );
     }
 
     #[test]
