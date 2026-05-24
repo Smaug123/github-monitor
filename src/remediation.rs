@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::facts::RepoFacts;
 use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath};
 use crate::github::types::{
-    ContentEncoding, CreateGitReference, CreatePullRequest, ForkPrApprovalPolicy, PullRequest,
-    RepositoryFileContent, RepositoryUpdate, RulesetRule, RulesetRuleType, UpdateRepositoryFile,
-    UpdateRulesetRequest,
+    ContentEncoding, CreateGitReference, CreatePullRequest, ForkPrApprovalPolicy, MergeMethod,
+    PullRequest, RepositoryFileContent, RepositoryUpdate, RulesetRule, RulesetRuleParameters,
+    RulesetRuleType, UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::rules::{
     RepoSetting, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
@@ -61,6 +61,12 @@ pub enum FixEffect {
         ruleset_id: u64,
         ruleset_name: String,
         rules: Vec<RulesetRule>,
+    },
+    SetRulesetPullRequestMergeMethods {
+        repo: RepoRef,
+        ruleset_id: u64,
+        ruleset_name: String,
+        allowed: Vec<MergeMethod>,
     },
     SetForkPrApprovalPolicy {
         repo: RepoRef,
@@ -141,6 +147,7 @@ struct QueuedRulesetUpdate {
     ruleset_name: String,
     rule_ids: Vec<RuleId>,
     rules_to_add: Vec<RulesetRule>,
+    set_pull_request_allowed_merge_methods: Option<Vec<MergeMethod>>,
 }
 
 impl PlannedFix {
@@ -207,6 +214,20 @@ impl FixEffect {
                     pluralize(rules.len(), "rule", "rules"),
                 )
             }
+            Self::SetRulesetPullRequestMergeMethods {
+                ruleset_name,
+                allowed,
+                ..
+            } => {
+                let methods = allowed
+                    .iter()
+                    .map(|method| format!("`{}`", String::from(method.clone())))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "set `pull_request` allowed merge methods on ruleset `{ruleset_name}` to: {methods}",
+                )
+            }
             Self::SetForkPrApprovalPolicy { policy, .. } => {
                 format!(
                     "set fork PR contributor approval policy to `{}`",
@@ -221,6 +242,7 @@ impl FixEffect {
             Self::SetRepositorySetting { repo, .. } => repo,
             Self::OpenWorkflowPinPullRequest { plan } => &plan.repo,
             Self::AddRulesetRules { repo, .. } => repo,
+            Self::SetRulesetPullRequestMergeMethods { repo, .. } => repo,
             Self::SetForkPrApprovalPolicy { repo, .. } => repo,
         }
     }
@@ -319,7 +341,8 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
                     }),
                 }
             }
-            FixPlan::Effect(FixEffect::AddRulesetRules { .. }) => {
+            FixPlan::Effect(FixEffect::AddRulesetRules { .. })
+            | FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods { .. }) => {
                 match execution
                     .ruleset_updates
                     .iter()
@@ -409,6 +432,20 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                     *ruleset_id,
                     ruleset_name.clone(),
                     rules.clone(),
+                );
+            }
+            FixEffect::SetRulesetPullRequestMergeMethods {
+                ruleset_id,
+                ruleset_name,
+                allowed,
+                ..
+            } => {
+                enqueue_set_pull_request_merge_methods(
+                    &mut queued_ruleset_updates,
+                    fix.rule_id.clone(),
+                    *ruleset_id,
+                    ruleset_name.clone(),
+                    allowed.clone(),
                 );
             }
             FixEffect::SetForkPrApprovalPolicy { policy, .. } => {
@@ -545,6 +582,35 @@ fn enqueue_ruleset_update(
             ruleset_name,
             rule_ids: vec![rule_id],
             rules_to_add: rules,
+            set_pull_request_allowed_merge_methods: None,
+        });
+    }
+}
+
+fn enqueue_set_pull_request_merge_methods(
+    queue: &mut Vec<QueuedRulesetUpdate>,
+    rule_id: RuleId,
+    ruleset_id: u64,
+    ruleset_name: String,
+    allowed: Vec<MergeMethod>,
+) {
+    if let Some(existing) = queue
+        .iter_mut()
+        .find(|entry| entry.ruleset_id == ruleset_id)
+    {
+        existing.rule_ids.push(rule_id);
+        debug_assert!(
+            existing.set_pull_request_allowed_merge_methods.is_none(),
+            "duplicate pull-request merge-method update for ruleset {ruleset_id}",
+        );
+        existing.set_pull_request_allowed_merge_methods = Some(allowed);
+    } else {
+        queue.push(QueuedRulesetUpdate {
+            ruleset_id,
+            ruleset_name,
+            rule_ids: vec![rule_id],
+            rules_to_add: Vec::new(),
+            set_pull_request_allowed_merge_methods: Some(allowed),
         });
     }
 }
@@ -571,6 +637,27 @@ fn apply_ruleset_update(
         {
             ruleset.rules.push(rule.clone());
         }
+    }
+
+    if let Some(allowed) = &queued.set_pull_request_allowed_merge_methods {
+        let pr_rule = match ruleset
+            .rules
+            .iter_mut()
+            .find(|rule| rule.kind == RulesetRuleType::PullRequest)
+        {
+            Some(rule) => rule,
+            None => {
+                ruleset.rules.push(RulesetRule {
+                    kind: RulesetRuleType::PullRequest,
+                    parameters: None,
+                });
+                ruleset.rules.last_mut().expect("just pushed")
+            }
+        };
+        let params = pr_rule
+            .parameters
+            .get_or_insert_with(RulesetRuleParameters::default);
+        params.allowed_merge_methods = allowed.clone();
     }
 
     let body = UpdateRulesetRequest::from_ruleset(&ruleset);
@@ -838,6 +925,9 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             RuleKind::RulesetRequiresPullRequest => {
                 plan_add_ruleset_rule(facts, RulesetRuleType::PullRequest)
             }
+            RuleKind::RulesetRestrictsMergeMethods { allowed } => {
+                plan_set_pull_request_merge_methods(facts, allowed)
+            }
             _ => FixPlan::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
             },
@@ -879,6 +969,58 @@ fn plan_add_ruleset_rule(facts: &RepoFacts, missing: RulesetRuleType) -> FixPlan
             }
         }
     }
+}
+
+fn plan_set_pull_request_merge_methods(facts: &RepoFacts, allowed: &[MergeMethod]) -> FixPlan {
+    let desired = merge_method_string_set(allowed);
+    let candidates = active_branch_rulesets_for_default_branch(facts)
+        .filter(|ruleset| {
+            ruleset
+                .rules
+                .iter()
+                .find(|rule| rule.kind == RulesetRuleType::PullRequest)
+                .map(|pr_rule| {
+                    let actual = pr_rule
+                        .parameters
+                        .as_ref()
+                        .map(|parameters| {
+                            merge_method_string_set(&parameters.allowed_merge_methods)
+                        })
+                        .unwrap_or_default();
+                    actual != desired
+                })
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    match candidates.as_slice() {
+        [] => FixPlan::Rejected {
+            reason: "no active branch ruleset applies to the default branch on which `pull_request.allowed_merge_methods` could be set"
+                .to_owned(),
+        },
+        [ruleset] => FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods {
+            repo: facts.repo.clone(),
+            ruleset_id: ruleset.id,
+            ruleset_name: ruleset.name.clone(),
+            allowed: allowed.to_vec(),
+        }),
+        many => {
+            let names = many
+                .iter()
+                .map(|ruleset| format!("`{}`", ruleset.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            FixPlan::Rejected {
+                reason: format!(
+                    "multiple active branch rulesets apply to the default branch ({names}); set `pull_request.allowed_merge_methods` on one manually",
+                ),
+            }
+        }
+    }
+}
+
+fn merge_method_string_set(methods: &[MergeMethod]) -> std::collections::BTreeSet<String> {
+    methods.iter().map(|m| String::from(m.clone())).collect()
 }
 
 fn plan_workflow_pin_pull_request(facts: &RepoFacts) -> FixPlan {
@@ -1155,6 +1297,7 @@ fn apply_fix_effect_to_repository_update(
         }
         FixEffect::OpenWorkflowPinPullRequest { .. }
         | FixEffect::AddRulesetRules { .. }
+        | FixEffect::SetRulesetPullRequestMergeMethods { .. }
         | FixEffect::SetForkPrApprovalPolicy { .. } => None,
     }
 }
@@ -1533,7 +1676,10 @@ mod tests {
             &facts,
         );
 
-        assert!(matches!(fixes[0].planned_report().status, FixStatus::Rejected { .. }));
+        assert!(matches!(
+            fixes[0].planned_report().status,
+            FixStatus::Rejected { .. }
+        ));
     }
 
     fn checkout_pin() -> WorkflowActionPin {
@@ -1550,7 +1696,10 @@ mod tests {
     #[test]
     fn workflow_pins_have_inline_flow_refs_false_for_block_yaml() {
         let yaml = "      - uses: actions/checkout@v3\n";
-        assert!(!workflow_pins_have_inline_flow_refs(&[checkout_pin()], yaml));
+        assert!(!workflow_pins_have_inline_flow_refs(
+            &[checkout_pin()],
+            yaml
+        ));
     }
 
     #[test]
@@ -1570,7 +1719,10 @@ mod tests {
         // Trailing comment text containing `"uses":` must not confuse the
         // regex; the line still matches the block-style pattern.
         let yaml = "      - uses: actions/checkout@v3 # was { \"uses\": \"v2\" }\n";
-        assert!(!workflow_pins_have_inline_flow_refs(&[checkout_pin()], yaml));
+        assert!(!workflow_pins_have_inline_flow_refs(
+            &[checkout_pin()],
+            yaml
+        ));
     }
 
     #[test]
@@ -2305,6 +2457,300 @@ mod tests {
             }
             other => panic!("expected failed status, got {other:?}"),
         }
+    }
+
+    fn rs011_rule() -> Rule {
+        Rule::new(
+            "RS011",
+            "Pull-request rule allows only squash merges",
+            RuleKind::RulesetRestrictsMergeMethods {
+                allowed: vec![MergeMethod::Squash],
+            },
+        )
+    }
+
+    fn rs010_rule() -> Rule {
+        Rule::new(
+            "RS010",
+            "Rulesets require a pull request",
+            RuleKind::RulesetRequiresPullRequest,
+        )
+    }
+
+    fn pull_request_rule_with_methods(methods: Vec<MergeMethod>) -> RulesetRule {
+        RulesetRule {
+            kind: RulesetRuleType::PullRequest,
+            parameters: Some(RulesetRuleParameters {
+                allowed_merge_methods: methods,
+                ..RulesetRuleParameters::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn set_pull_request_merge_methods_fix_targets_sole_active_branch_ruleset_when_pr_rule_absent() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
+
+        let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods {
+                repo: facts.repo.clone(),
+                ruleset_id: 42,
+                ruleset_name: "main protection".to_owned(),
+                allowed: vec![MergeMethod::Squash],
+            })
+        );
+        assert_eq!(
+            fixes[0].planned_report().description,
+            "set `pull_request` allowed merge methods on ruleset `main protection` to: `squash`"
+        );
+    }
+
+    #[test]
+    fn set_pull_request_merge_methods_fix_targets_sole_active_branch_ruleset_when_pr_rule_present_with_wrong_methods()
+     {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![pull_request_rule_with_methods(vec![
+                MergeMethod::Merge,
+                MergeMethod::Squash,
+            ])],
+        )];
+
+        let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::SetRulesetPullRequestMergeMethods {
+                repo: facts.repo.clone(),
+                ruleset_id: 42,
+                ruleset_name: "main protection".to_owned(),
+                allowed: vec![MergeMethod::Squash],
+            })
+        );
+    }
+
+    #[test]
+    fn set_pull_request_merge_methods_fix_rejects_when_no_ruleset_exists() {
+        let facts = base_facts();
+
+        let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].plan {
+            FixPlan::Rejected { reason } => {
+                assert!(
+                    reason.contains("no active branch ruleset"),
+                    "unexpected rejection reason: {reason}"
+                );
+                assert!(reason.contains("allowed_merge_methods"));
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_pull_request_merge_methods_fix_rejects_when_multiple_rulesets_match() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![
+            ruleset_for_default_branch(1, "main protection", Vec::new()),
+            ruleset_for_default_branch(2, "extra protection", Vec::new()),
+        ];
+
+        let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].plan {
+            FixPlan::Rejected { reason } => {
+                assert!(reason.contains("`main protection`"), "reason: {reason}");
+                assert!(reason.contains("`extra protection`"), "reason: {reason}");
+                assert!(reason.contains("allowed_merge_methods"));
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_pull_request_merge_methods_fix_not_planned_when_methods_already_match() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            1,
+            "main protection",
+            vec![pull_request_rule_with_methods(vec![MergeMethod::Squash])],
+        )];
+
+        let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
+
+        assert!(
+            fixes.is_empty(),
+            "expected no fixes (rule passes), got {fixes:?}"
+        );
+    }
+
+    #[test]
+    fn execute_repo_fixes_preserves_other_pull_request_parameters_when_setting_merge_methods() {
+        // The existing PR rule has additional parameters that the auto-fix must
+        // NOT clobber. This is the load-bearing property of the in-place
+        // mutation strategy.
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::PullRequest,
+                parameters: Some(RulesetRuleParameters {
+                    required_approving_review_count: Some(2),
+                    require_code_owner_review: Some(true),
+                    allowed_merge_methods: vec![MergeMethod::Merge, MergeMethod::Squash],
+                    ..RulesetRuleParameters::default()
+                }),
+            }],
+        )];
+        let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
+
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/rulesets/42",
+                |_| {},
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_code_owner_review":true,"allowed_merge_methods":["merge","squash"]}}]}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/rulesets/42",
+                |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let rules = json["rules"].as_array().unwrap();
+                    assert_eq!(rules.len(), 1);
+                    assert_eq!(rules[0]["type"], "pull_request");
+                    let parameters = &rules[0]["parameters"];
+                    assert_eq!(parameters["allowed_merge_methods"], serde_json::json!(["squash"]));
+                    assert_eq!(parameters["required_approving_review_count"], 2);
+                    assert_eq!(parameters["require_code_owner_review"], true);
+                },
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_code_owner_review":true,"allowed_merge_methods":["squash"]}}]}"#
+                    .to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_adds_pull_request_rule_with_squash_only_when_absent() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
+        let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
+
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/rulesets/42",
+                |_| {},
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[]}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/rulesets/42",
+                |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let rules = json["rules"].as_array().unwrap();
+                    assert_eq!(rules.len(), 1);
+                    assert_eq!(rules[0]["type"], "pull_request");
+                    assert_eq!(
+                        rules[0]["parameters"]["allowed_merge_methods"],
+                        serde_json::json!(["squash"])
+                    );
+                },
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"allowed_merge_methods":["squash"]}}]}"#
+                    .to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_batches_rs010_and_rs011_into_one_ruleset_put() {
+        // When both RS010 (add pull_request rule) and RS011 (set
+        // allowed_merge_methods) fail on the same ruleset, the fixes must be
+        // merged into a single PUT that introduces the pull_request rule with
+        // the desired merge methods.
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            Vec::new(),
+        )];
+        let fixes = plan_repo_fixes(&[rs010_rule(), rs011_rule()], &facts);
+        assert_eq!(fixes.len(), 2);
+
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/rulesets/42",
+                |_| {},
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[]}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/rulesets/42",
+                |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let rules = json["rules"].as_array().unwrap();
+                    assert_eq!(rules.len(), 1, "expected a single pull_request rule");
+                    assert_eq!(rules[0]["type"], "pull_request");
+                    assert_eq!(
+                        rules[0]["parameters"]["allowed_merge_methods"],
+                        serde_json::json!(["squash"])
+                    );
+                },
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"allowed_merge_methods":["squash"]}}]}"#
+                    .to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 2);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+        assert_eq!(executed[1].status, FixStatus::Applied);
     }
 
     fn st007_rule() -> Rule {
