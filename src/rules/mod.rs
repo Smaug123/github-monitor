@@ -9,7 +9,9 @@ mod types;
 mod workflows;
 
 pub use self::catalog::default_rules;
-pub(crate) use self::rulesets::active_branch_rulesets_for_default_branch;
+pub(crate) use self::rulesets::{
+    active_branch_rulesets_for_default_branch, legacy_protection_superseded_by_rulesets,
+};
 pub use self::types::{RepoSetting, Rule, RuleKind, RuleOutput, RuleResult, SettingValue};
 
 use crate::facts::RepoFacts;

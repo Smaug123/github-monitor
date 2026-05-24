@@ -265,13 +265,152 @@ pub struct RequiredStatusCheck {
     pub integration_id: Option<u64>,
 }
 
-// Marker for the presence of legacy (pre-rulesets) branch protection on a
-// specific branch. The GitHub branch-protection endpoint returns a large
-// structured body whose fields none of the current rules consume; presence is
-// the entire signal. Unknown fields deserialize into nothing here, which is
-// exactly what we want — extend with named fields when a rule needs them.
+// Parsed shape of the legacy (pre-rulesets) branch-protection endpoint. We only
+// model fields the autofix needs to reason about when deciding whether
+// rulesets supersede the legacy protection; unknown fields are silently
+// dropped on deserialization, which means the autofix planner must refuse to
+// delete an empty parse (could be GitHub fields we don't know about yet).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BranchProtection {}
+pub struct BranchProtection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_status_checks: Option<LegacyRequiredStatusChecks>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_pull_request_reviews: Option<LegacyRequiredPullRequestReviews>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_linear_history: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_force_pushes: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_deletions: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_signatures: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_conversation_resolution: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_admins: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_creations: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_branch: Option<LegacyEnabledFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restrictions: Option<LegacyRestrictions>,
+}
+
+impl BranchProtection {
+    /// True when every parsed field is absent — either because the protection
+    /// is genuinely empty, or because GitHub returned fields our model doesn't
+    /// yet recognise. The autofix treats this as ambiguous.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            required_status_checks,
+            required_pull_request_reviews,
+            required_linear_history,
+            allow_force_pushes,
+            allow_deletions,
+            required_signatures,
+            required_conversation_resolution,
+            enforce_admins,
+            block_creations,
+            lock_branch,
+            restrictions,
+        } = self;
+        required_status_checks.is_none()
+            && required_pull_request_reviews.is_none()
+            && required_linear_history.is_none()
+            && allow_force_pushes.is_none()
+            && allow_deletions.is_none()
+            && required_signatures.is_none()
+            && required_conversation_resolution.is_none()
+            && enforce_admins.is_none()
+            && block_creations.is_none()
+            && lock_branch.is_none()
+            && restrictions.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyEnabledFlag {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyRequiredStatusChecks {
+    #[serde(default)]
+    pub strict: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<String>,
+    // Newer field replacing `contexts`; carries an optional app id alongside.
+    // We normalise to context strings for the supersedes check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<LegacyStatusCheck>,
+}
+
+impl LegacyRequiredStatusChecks {
+    /// Union of `contexts` and the context names from `checks`.
+    pub fn all_contexts(&self) -> std::collections::BTreeSet<String> {
+        let mut set: std::collections::BTreeSet<String> = self.contexts.iter().cloned().collect();
+        for check in &self.checks {
+            set.insert(check.context.clone());
+        }
+        set
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyStatusCheck {
+    pub context: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyRequiredPullRequestReviews {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_approving_review_count: Option<u32>,
+    #[serde(default)]
+    pub require_code_owner_reviews: bool,
+    #[serde(default)]
+    pub dismiss_stale_reviews: bool,
+    #[serde(default)]
+    pub require_last_push_approval: bool,
+    #[serde(default)]
+    pub required_review_thread_resolution: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass_pull_request_allowances: Option<LegacyBypassPullRequestAllowances>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyBypassPullRequestAllowances {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<serde_json::Value>,
+}
+
+impl LegacyBypassPullRequestAllowances {
+    pub fn is_empty(&self) -> bool {
+        self.users.is_empty() && self.teams.is_empty() && self.apps.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyRestrictions {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<serde_json::Value>,
+}
+
+impl LegacyRestrictions {
+    pub fn is_empty(&self) -> bool {
+        self.users.is_empty() && self.teams.is_empty() && self.apps.is_empty()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryFileContent {
@@ -463,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_branch_protection_payload_ignoring_unknown_fields() {
+    fn deserializes_branch_protection_payload_with_populated_fields() {
         let protection: BranchProtection = serde_json::from_str(
             r#"
 {
@@ -471,20 +610,75 @@ mod tests {
   "required_status_checks": {
     "url": "https://api.github.com/repos/example/example/branches/main/protection/required_status_checks",
     "strict": true,
-    "contexts": ["ci"]
+    "contexts": ["ci"],
+    "checks": [{"context": "ci", "app_id": 17}]
+  },
+  "required_pull_request_reviews": {
+    "url": "https://api.github.com/repos/example/example/branches/main/protection/required_pull_request_reviews",
+    "required_approving_review_count": 2,
+    "require_code_owner_reviews": true,
+    "dismiss_stale_reviews": true,
+    "require_last_push_approval": false,
+    "required_review_thread_resolution": true
   },
   "enforce_admins": {
     "url": "https://api.github.com/repos/example/example/branches/main/protection/enforce_admins",
     "enabled": true
   },
   "required_linear_history": {"enabled": true},
-  "allow_force_pushes": {"enabled": false}
+  "allow_force_pushes": {"enabled": false},
+  "allow_deletions": {"enabled": false},
+  "required_signatures": {"enabled": true},
+  "required_conversation_resolution": {"enabled": true},
+  "block_creations": {"enabled": false},
+  "lock_branch": {"enabled": false}
 }
 "#,
         )
         .unwrap();
 
-        assert_eq!(protection, BranchProtection::default());
+        let status_checks = protection.required_status_checks.as_ref().unwrap();
+        assert!(status_checks.strict);
+        assert_eq!(status_checks.contexts, vec!["ci".to_owned()]);
+        assert_eq!(status_checks.checks.len(), 1);
+        assert_eq!(status_checks.checks[0].context, "ci");
+        assert_eq!(status_checks.checks[0].app_id, Some(17));
+
+        let reviews = protection.required_pull_request_reviews.as_ref().unwrap();
+        assert_eq!(reviews.required_approving_review_count, Some(2));
+        assert!(reviews.require_code_owner_reviews);
+        assert!(reviews.dismiss_stale_reviews);
+        assert!(!reviews.require_last_push_approval);
+        assert!(reviews.required_review_thread_resolution);
+
+        assert_eq!(
+            protection.enforce_admins,
+            Some(LegacyEnabledFlag { enabled: true })
+        );
+        assert_eq!(
+            protection.required_linear_history,
+            Some(LegacyEnabledFlag { enabled: true })
+        );
+        assert_eq!(
+            protection.allow_force_pushes,
+            Some(LegacyEnabledFlag { enabled: false })
+        );
+        assert_eq!(
+            protection.required_signatures,
+            Some(LegacyEnabledFlag { enabled: true })
+        );
+        assert_eq!(
+            protection.required_conversation_resolution,
+            Some(LegacyEnabledFlag { enabled: true })
+        );
+        assert!(!protection.is_empty());
+    }
+
+    #[test]
+    fn deserializes_branch_protection_payload_ignoring_unknown_fields() {
+        let protection: BranchProtection =
+            serde_json::from_str(r#"{"unrecognised_field": {"enabled": true}}"#).unwrap();
+        assert!(protection.is_empty());
         assert_eq!(serde_json::to_string(&protection).unwrap(), "{}");
     }
 

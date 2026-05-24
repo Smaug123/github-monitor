@@ -7,9 +7,11 @@ use super::workflows::is_commit_sha;
 use super::*;
 use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
-    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrApprovalPolicy, MergeMethod,
-    RefNameCondition, RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement,
-    RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
+    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrApprovalPolicy,
+    LegacyEnabledFlag, LegacyRequiredPullRequestReviews, LegacyRequiredStatusChecks,
+    LegacyRestrictions, MergeMethod, RefNameCondition, RequiredStatusCheck, Ruleset,
+    RulesetConditions, RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType,
+    RulesetTarget,
 };
 use crate::types::{BranchName, RepoRef, RuleId};
 use crate::workflow::model::{
@@ -1904,4 +1906,359 @@ fn ruleset_requires_strict_status_checks_fails_without_required_status_checks_ru
         evaluate(&RuleKind::RulesetRequiresStrictStatusChecks, &facts),
         RuleResult::Fail { .. }
     ));
+}
+
+fn pull_request_rule(parameters: RulesetRuleParameters) -> RulesetRule {
+    RulesetRule {
+        kind: RulesetRuleType::PullRequest,
+        parameters: Some(parameters),
+    }
+}
+
+fn rule_without_parameters(kind: RulesetRuleType) -> RulesetRule {
+    RulesetRule {
+        kind,
+        parameters: None,
+    }
+}
+
+fn fully_covering_facts() -> RepoFacts {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![
+        required_status_checks_rule(Some(true)),
+        pull_request_rule(RulesetRuleParameters {
+            required_approving_review_count: Some(2),
+            require_code_owner_review: Some(true),
+            require_last_push_approval: Some(true),
+            required_review_thread_resolution: Some(true),
+            dismiss_stale_reviews_on_push: Some(true),
+            ..RulesetRuleParameters::default()
+        }),
+        rule_without_parameters(RulesetRuleType::RequiredLinearHistory),
+        rule_without_parameters(RulesetRuleType::NonFastForward),
+        rule_without_parameters(RulesetRuleType::Deletion),
+        rule_without_parameters(RulesetRuleType::RequiredSignatures),
+        rule_without_parameters(RulesetRuleType::Creation),
+    ])];
+    facts
+}
+
+fn fully_covering_legacy() -> BranchProtection {
+    BranchProtection {
+        required_status_checks: Some(LegacyRequiredStatusChecks {
+            strict: true,
+            contexts: vec!["ci".to_owned()],
+            checks: Vec::new(),
+        }),
+        required_pull_request_reviews: Some(LegacyRequiredPullRequestReviews {
+            required_approving_review_count: Some(2),
+            require_code_owner_reviews: true,
+            dismiss_stale_reviews: true,
+            require_last_push_approval: true,
+            required_review_thread_resolution: true,
+            bypass_pull_request_allowances: None,
+        }),
+        required_linear_history: Some(LegacyEnabledFlag { enabled: true }),
+        allow_force_pushes: Some(LegacyEnabledFlag { enabled: false }),
+        allow_deletions: Some(LegacyEnabledFlag { enabled: false }),
+        required_signatures: Some(LegacyEnabledFlag { enabled: true }),
+        required_conversation_resolution: Some(LegacyEnabledFlag { enabled: true }),
+        enforce_admins: Some(LegacyEnabledFlag { enabled: true }),
+        block_creations: Some(LegacyEnabledFlag { enabled: true }),
+        lock_branch: Some(LegacyEnabledFlag { enabled: false }),
+        restrictions: None,
+    }
+}
+
+#[test]
+fn supersedes_rejects_empty_legacy_protection() {
+    let facts = base_facts();
+    let legacy = BranchProtection::default();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert_eq!(reasons.len(), 1);
+    assert!(
+        reasons[0].contains("no fields our model recognises"),
+        "reason: {}",
+        reasons[0]
+    );
+}
+
+#[test]
+fn supersedes_accepts_fully_covered_legacy_protection() {
+    let facts = fully_covering_facts();
+    let legacy = fully_covering_legacy();
+    legacy_protection_superseded_by_rulesets(&legacy, &facts).expect("should be superseded");
+}
+
+#[test]
+fn supersedes_rejects_missing_status_check_context() {
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0].rules[0] = RulesetRule {
+        kind: RulesetRuleType::RequiredStatusChecks,
+        parameters: Some(RulesetRuleParameters {
+            required_status_checks: vec![RequiredStatusCheck {
+                context: "other".to_owned(),
+                integration_id: None,
+            }],
+            strict_required_status_checks_policy: Some(true),
+            ..RulesetRuleParameters::default()
+        }),
+    };
+    let legacy = fully_covering_legacy();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("`ci`") && reason.contains("not enforced")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_legacy_strict_without_strict_ruleset() {
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0].rules[0] = required_status_checks_rule(Some(false));
+    let legacy = fully_covering_legacy();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons.iter().any(|reason| reason.contains("strict")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_pr_review_count_below_legacy() {
+    let mut facts = fully_covering_facts();
+    if let Some(parameters) = facts.rulesets[0].rules[1].parameters.as_mut() {
+        parameters.required_approving_review_count = Some(1);
+    }
+    let legacy = fully_covering_legacy();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("2 approving reviews")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_when_no_ruleset_blocks_force_pushes() {
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0]
+        .rules
+        .retain(|rule| rule.kind != RulesetRuleType::NonFastForward);
+    let legacy = fully_covering_legacy();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons.iter().any(|reason| reason.contains("non_fast_forward")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_treats_missing_allow_force_pushes_as_restrictive() {
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0]
+        .rules
+        .retain(|rule| rule.kind != RulesetRuleType::NonFastForward);
+    let mut legacy = fully_covering_legacy();
+    legacy.allow_force_pushes = None;
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons.iter().any(|reason| reason.contains("force pushes")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_ignores_allow_force_pushes_when_legacy_is_permissive() {
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0]
+        .rules
+        .retain(|rule| rule.kind != RulesetRuleType::NonFastForward);
+    let mut legacy = fully_covering_legacy();
+    legacy.allow_force_pushes = Some(LegacyEnabledFlag { enabled: true });
+
+    legacy_protection_superseded_by_rulesets(&legacy, &facts).expect("permissive legacy is fine");
+}
+
+#[test]
+fn supersedes_rejects_restrictions_with_any_entries() {
+    let facts = fully_covering_facts();
+    let mut legacy = fully_covering_legacy();
+    legacy.restrictions = Some(LegacyRestrictions {
+        users: vec![serde_json::json!({"login": "alice"})],
+        teams: Vec::new(),
+        apps: Vec::new(),
+    });
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons.iter().any(|reason| reason.contains("restrictions")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_lock_branch() {
+    let facts = fully_covering_facts();
+    let mut legacy = fully_covering_legacy();
+    legacy.lock_branch = Some(LegacyEnabledFlag { enabled: true });
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons.iter().any(|reason| reason.contains("lock_branch")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_enforce_admins_when_ruleset_allows_bypass() {
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0].bypass_actors.push(BypassActor {
+        actor_id: Some(1),
+        actor_type: BypassActorType::OrganizationAdmin,
+        bypass_mode: BypassMode::Always,
+    });
+    let legacy = fully_covering_legacy();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons.iter().any(|reason| reason.contains("enforce_admins")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_when_pr_reviews_present_but_no_pr_rule() {
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0]
+        .rules
+        .retain(|rule| rule.kind != RulesetRuleType::PullRequest);
+    let legacy = fully_covering_legacy();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("no active branch ruleset contains a `pull_request`")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_when_bypass_pull_request_allowances_non_empty() {
+    let facts = fully_covering_facts();
+    let mut legacy = fully_covering_legacy();
+    legacy
+        .required_pull_request_reviews
+        .as_mut()
+        .unwrap()
+        .bypass_pull_request_allowances = Some(crate::github::types::LegacyBypassPullRequestAllowances {
+        users: vec![serde_json::json!({"login": "alice"})],
+        teams: Vec::new(),
+        apps: Vec::new(),
+    });
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("bypass_pull_request_allowances")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_status_check_context_set_normalises_legacy_checks_field() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
+        kind: RulesetRuleType::RequiredStatusChecks,
+        parameters: Some(RulesetRuleParameters {
+            required_status_checks: vec![
+                RequiredStatusCheck {
+                    context: "ci".to_owned(),
+                    integration_id: None,
+                },
+                RequiredStatusCheck {
+                    context: "lint".to_owned(),
+                    integration_id: None,
+                },
+            ],
+            ..RulesetRuleParameters::default()
+        }),
+    }])];
+    let legacy = BranchProtection {
+        required_status_checks: Some(LegacyRequiredStatusChecks {
+            strict: false,
+            contexts: Vec::new(),
+            checks: vec![
+                crate::github::types::LegacyStatusCheck {
+                    context: "ci".to_owned(),
+                    app_id: Some(17),
+                },
+                crate::github::types::LegacyStatusCheck {
+                    context: "lint".to_owned(),
+                    app_id: None,
+                },
+            ],
+        }),
+        allow_force_pushes: Some(LegacyEnabledFlag { enabled: true }),
+        allow_deletions: Some(LegacyEnabledFlag { enabled: true }),
+        ..BranchProtection::default()
+    };
+
+    legacy_protection_superseded_by_rulesets(&legacy, &facts).expect("contexts covered");
+}
+
+#[test]
+fn supersedes_status_check_unions_contexts_across_rulesets() {
+    let mut facts = base_facts();
+    facts.rulesets = vec![
+        Ruleset {
+            id: 1,
+            ..active_branch_ruleset(vec![RulesetRule {
+                kind: RulesetRuleType::RequiredStatusChecks,
+                parameters: Some(RulesetRuleParameters {
+                    required_status_checks: vec![RequiredStatusCheck {
+                        context: "ci".to_owned(),
+                        integration_id: None,
+                    }],
+                    ..RulesetRuleParameters::default()
+                }),
+            }])
+        },
+        Ruleset {
+            id: 2,
+            ..active_branch_ruleset(vec![RulesetRule {
+                kind: RulesetRuleType::RequiredStatusChecks,
+                parameters: Some(RulesetRuleParameters {
+                    required_status_checks: vec![RequiredStatusCheck {
+                        context: "lint".to_owned(),
+                        integration_id: None,
+                    }],
+                    ..RulesetRuleParameters::default()
+                }),
+            }])
+        },
+    ];
+    let legacy = BranchProtection {
+        required_status_checks: Some(LegacyRequiredStatusChecks {
+            strict: false,
+            contexts: vec!["ci".to_owned(), "lint".to_owned()],
+            checks: Vec::new(),
+        }),
+        allow_force_pushes: Some(LegacyEnabledFlag { enabled: true }),
+        allow_deletions: Some(LegacyEnabledFlag { enabled: true }),
+        ..BranchProtection::default()
+    };
+
+    legacy_protection_superseded_by_rulesets(&legacy, &facts).expect("union covers");
 }

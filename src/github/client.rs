@@ -230,6 +230,22 @@ impl GitHubClient {
         )
     }
 
+    pub fn delete_branch_protection(
+        &mut self,
+        repo: &RepoRef,
+        branch: &BranchName,
+    ) -> Result<(), GitHubClientError> {
+        let encoded_branch = percent_encode_path_segment(&branch.to_string());
+        self.send_delete(
+            repo,
+            &format!(
+                "{}/repos/{repo}/branches/{encoded_branch}/protection",
+                self.api_base_url
+            ),
+        )?;
+        Ok(())
+    }
+
     pub fn get_fork_pr_approval_permission(
         &mut self,
         repo: &RepoRef,
@@ -1232,9 +1248,14 @@ mod tests {
 
         let protection = client
             .get_branch_protection(&RepoRef::new("owner", "repo"), &BranchName::new("main"))
-            .unwrap();
+            .unwrap()
+            .expect("200 response should yield Some");
 
-        assert_eq!(protection, Some(BranchProtection::default()));
+        assert_eq!(
+            protection.required_linear_history,
+            Some(crate::github::types::LegacyEnabledFlag { enabled: true })
+        );
+        assert!(protection.required_status_checks.is_none());
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::github::types::{
 use crate::rules::{
     RepoSetting, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
     active_branch_rulesets_for_default_branch, evaluate_rules,
+    legacy_protection_superseded_by_rulesets,
 };
 use crate::types::{BranchName, RepoRef, RuleId};
 use crate::workflow::model::{ActionRef, ActionReference};
@@ -86,6 +87,10 @@ pub enum FixEffect {
         repo: RepoRef,
         policy: ForkPrApprovalPolicy,
     },
+    DeleteLegacyBranchProtection {
+        repo: RepoRef,
+        branch: BranchName,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +149,7 @@ struct RepoFixExecution {
     pull_requests: Vec<PullRequestExecution>,
     ruleset_updates: Vec<RulesetUpdateExecution>,
     fork_pr_approval_policy: Option<Result<(), String>>,
+    legacy_branch_protection_deletion: Option<Result<(), String>>,
 }
 
 #[derive(Debug)]
@@ -278,6 +284,9 @@ impl FixEffect {
                     String::from(policy.clone())
                 )
             }
+            Self::DeleteLegacyBranchProtection { branch, .. } => {
+                format!("delete legacy branch protection on `{branch}`")
+            }
         }
     }
 
@@ -291,6 +300,7 @@ impl FixEffect {
             Self::SetRulesetStrictRequiredStatusChecks { repo, .. } => repo,
             Self::EnsureRulesetRequiredStatusCheck { repo, .. } => repo,
             Self::SetForkPrApprovalPolicy { repo, .. } => repo,
+            Self::DeleteLegacyBranchProtection { repo, .. } => repo,
         }
     }
 }
@@ -426,6 +436,19 @@ pub fn execute_repo_fixes(client: &mut GitHubClient, fixes: &[PlannedFix]) -> Ve
                     }),
                 }
             }
+            FixPlan::Effect(FixEffect::DeleteLegacyBranchProtection { .. }) => {
+                match execution.legacy_branch_protection_deletion.as_ref() {
+                    Some(Ok(())) => fix.with_status(FixStatus::Applied),
+                    Some(Err(reason)) => fix.with_status(FixStatus::Failed {
+                        reason: reason.clone(),
+                    }),
+                    None => fix.with_status(FixStatus::Failed {
+                        reason:
+                            "internal error: missing legacy branch protection deletion execution result"
+                                .to_owned(),
+                    }),
+                }
+            }
         })
         .collect()
 }
@@ -438,6 +461,7 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
     let mut queued_envrc_pull_requests = Vec::<QueuedEnvrcPullRequest>::new();
     let mut queued_ruleset_updates = Vec::<QueuedRulesetUpdate>::new();
     let mut fork_pr_approval_policy_to_apply = None::<ForkPrApprovalPolicy>;
+    let mut legacy_branch_protection_to_delete = None::<BranchName>;
     let mut internal_error = None::<String>;
 
     for fix in fixes {
@@ -534,6 +558,9 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             FixEffect::SetForkPrApprovalPolicy { policy, .. } => {
                 fork_pr_approval_policy_to_apply = Some(policy.clone());
             }
+            FixEffect::DeleteLegacyBranchProtection { branch, .. } => {
+                legacy_branch_protection_to_delete = Some(branch.clone());
+            }
         }
     }
 
@@ -563,6 +590,9 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 })
                 .collect(),
             fork_pr_approval_policy: fork_pr_approval_policy_to_apply
+                .as_ref()
+                .map(|_| Err(reason.clone())),
+            legacy_branch_protection_deletion: legacy_branch_protection_to_delete
                 .as_ref()
                 .map(|_| Err(reason.clone())),
         };
@@ -595,6 +625,9 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 })
                 .collect(),
             fork_pr_approval_policy: fork_pr_approval_policy_to_apply
+                .as_ref()
+                .map(|_| Err(reason.clone())),
+            legacy_branch_protection_deletion: legacy_branch_protection_to_delete
                 .as_ref()
                 .map(|_| Err(reason.clone())),
         };
@@ -652,11 +685,21 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             .map_err(|error| error.to_string())
     });
 
+    let legacy_branch_protection_deletion = legacy_branch_protection_to_delete.map(|branch| {
+        let repo = repo
+            .as_ref()
+            .expect("repository recorded whenever a legacy branch protection effect is present");
+        client
+            .delete_branch_protection(repo, &branch)
+            .map_err(|error| error.to_string())
+    });
+
     RepoFixExecution {
         repo_settings,
         pull_requests,
         ruleset_updates,
         fork_pr_approval_policy,
+        legacy_branch_protection_deletion,
     }
 }
 
@@ -1270,6 +1313,9 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
                     },
                 })
             }
+            RuleKind::UsesRulesetsNotLegacyProtection => {
+                plan_delete_legacy_branch_protection(facts)
+            }
             _ => FixPlan::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
             },
@@ -1447,6 +1493,29 @@ fn plan_set_strict_required_status_checks(facts: &RepoFacts) -> FixPlan {
                 ),
             }
         }
+    }
+}
+
+fn plan_delete_legacy_branch_protection(facts: &RepoFacts) -> FixPlan {
+    let Some(legacy) = facts.legacy_branch_protection.as_ref() else {
+        return FixPlan::Rejected {
+            reason:
+                "internal error: no legacy branch protection present despite RS007 failure"
+                    .to_owned(),
+        };
+    };
+
+    match legacy_protection_superseded_by_rulesets(legacy, facts) {
+        Ok(()) => FixPlan::Effect(FixEffect::DeleteLegacyBranchProtection {
+            repo: facts.repo.clone(),
+            branch: facts.default_branch.clone(),
+        }),
+        Err(reasons) => FixPlan::Rejected {
+            reason: format!(
+                "legacy branch protection is not fully superseded by rulesets: {}",
+                reasons.join("; ")
+            ),
+        },
     }
 }
 
@@ -1728,7 +1797,8 @@ fn apply_fix_effect_to_repository_update(
         | FixEffect::SetRulesetPullRequestMergeMethods { .. }
         | FixEffect::SetRulesetStrictRequiredStatusChecks { .. }
         | FixEffect::EnsureRulesetRequiredStatusCheck { .. }
-        | FixEffect::SetForkPrApprovalPolicy { .. } => None,
+        | FixEffect::SetForkPrApprovalPolicy { .. }
+        | FixEffect::DeleteLegacyBranchProtection { .. } => None,
     }
 }
 
@@ -3799,6 +3869,153 @@ mod tests {
             FixStatus::Failed { reason } => {
                 assert!(
                     reason.contains("fork-pr-contributor-approval"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected failed status, got {other:?}"),
+        }
+    }
+
+    fn rs007_rule() -> Rule {
+        Rule::new(
+            "RS007",
+            "Repository uses rulesets instead of legacy protection",
+            RuleKind::UsesRulesetsNotLegacyProtection,
+        )
+    }
+
+    fn linear_history_legacy() -> crate::github::types::BranchProtection {
+        use crate::github::types::{BranchProtection, LegacyEnabledFlag};
+        BranchProtection {
+            required_linear_history: Some(LegacyEnabledFlag { enabled: true }),
+            allow_force_pushes: Some(LegacyEnabledFlag { enabled: true }),
+            allow_deletions: Some(LegacyEnabledFlag { enabled: true }),
+            ..BranchProtection::default()
+        }
+    }
+
+    #[test]
+    fn delete_legacy_branch_protection_rejected_when_not_superseded() {
+        let mut facts = base_facts();
+        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.rulesets = vec![ruleset_for_default_branch(1, "main protection", Vec::new())];
+
+        let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        match &fixes[0].plan {
+            FixPlan::Rejected { reason } => {
+                assert!(
+                    reason.contains("not fully superseded"),
+                    "unexpected rejection reason: {reason}"
+                );
+                assert!(
+                    reason.contains("required_linear_history"),
+                    "rejection should mention the missing rule: {reason}"
+                );
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_legacy_branch_protection_planned_when_superseded() {
+        let mut facts = base_facts();
+        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.rulesets = vec![ruleset_for_default_branch(
+            1,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredLinearHistory,
+                parameters: None,
+            }],
+        )];
+
+        let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
+
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::DeleteLegacyBranchProtection {
+                repo: facts.repo.clone(),
+                branch: facts.default_branch.clone(),
+            }),
+        );
+        assert_eq!(
+            fixes[0].planned_report().description,
+            "delete legacy branch protection on `main`"
+        );
+    }
+
+    #[test]
+    fn execute_repo_fixes_deletes_legacy_branch_protection() {
+        let mut facts = base_facts();
+        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.rulesets = vec![ruleset_for_default_branch(
+            1,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredLinearHistory,
+                parameters: None,
+            }],
+        )];
+        let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
+
+        let server = TestServer::spawn(vec![ExpectedRequest::with_status_and_path_assertion(
+            "DELETE",
+            |path| {
+                assert_eq!(path, "/repos/example-org/repo/branches/main/protection");
+            },
+            |_| {},
+            204,
+            String::new(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_reports_failure_when_delete_branch_protection_fails() {
+        let mut facts = base_facts();
+        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.rulesets = vec![ruleset_for_default_branch(
+            1,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredLinearHistory,
+                parameters: None,
+            }],
+        )];
+        let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
+
+        let server = TestServer::spawn(vec![ExpectedRequest::with_status_and_path_assertion(
+            "DELETE",
+            |path| {
+                assert_eq!(path, "/repos/example-org/repo/branches/main/protection");
+            },
+            |_| {},
+            500,
+            "{}".to_owned(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        match &executed[0].status {
+            FixStatus::Failed { reason } => {
+                assert!(
+                    reason.contains("branches/main/protection"),
                     "unexpected failure reason: {reason}"
                 );
             }
