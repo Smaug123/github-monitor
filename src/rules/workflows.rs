@@ -1,4 +1,7 @@
-use crate::facts::RepoFacts;
+use std::collections::BTreeSet;
+
+use crate::facts::{RepoFacts, WorkflowFile};
+use crate::workflow::expressions::{expression_blocks, references_secret, secret_tokens};
 use crate::workflow::model::{ActionReference, Job, Step, Workflow};
 
 use super::glob::{branch_matches_filters, branch_pattern_matches};
@@ -135,8 +138,90 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
             }
         }
         RuleKind::WorkflowHasRequiredChecksComplete => evaluate_required_checks_complete(facts),
+        RuleKind::NoPullRequestSecretReferences => evaluate_pr_secrets(facts),
         _ => unreachable!("non-workflow rule passed to workflows::evaluate"),
     }
+}
+
+fn evaluate_pr_secrets(facts: &RepoFacts) -> RuleResult {
+    let mut offenders: Vec<String> = Vec::new();
+    let mut unevaluated: Vec<String> = Vec::new();
+
+    for workflow_file in &facts.workflows {
+        if !workflow_has_pr_trigger(&workflow_file.workflow) {
+            continue;
+        }
+        match collect_pr_secret_references(workflow_file) {
+            PrSecretScan::Refs(refs) if refs.is_empty() => {}
+            PrSecretScan::Refs(refs) => {
+                let listed = refs.into_iter().collect::<Vec<_>>().join(", ");
+                offenders.push(format!("{}: {}", workflow_file.path, listed));
+            }
+            PrSecretScan::Unevaluable => {
+                unevaluated.push(workflow_file.path.clone());
+            }
+        }
+    }
+
+    match (offenders.is_empty(), unevaluated.is_empty()) {
+        (true, true) => RuleResult::Pass,
+        (true, false) => RuleResult::Skip {
+            reason: format!(
+                "raw YAML unavailable for PR-triggered workflows: {}",
+                unevaluated.join(", ")
+            ),
+        },
+        (false, _) => RuleResult::Fail {
+            reason: format!(
+                "PR-triggered workflows must not reference `secrets.*`: {}",
+                summarize_examples(&offenders)
+            ),
+        },
+    }
+}
+
+enum PrSecretScan {
+    Refs(BTreeSet<String>),
+    Unevaluable,
+}
+
+fn collect_pr_secret_references(workflow_file: &WorkflowFile) -> PrSecretScan {
+    let Some(raw) = workflow_file.raw_yaml.as_deref() else {
+        return PrSecretScan::Unevaluable;
+    };
+    let Ok(parsed) = serde_yml::from_str::<serde_yml::Value>(raw) else {
+        return PrSecretScan::Unevaluable;
+    };
+    let mut refs = BTreeSet::new();
+    walk_secret_references(&parsed, &mut refs);
+    PrSecretScan::Refs(refs)
+}
+
+fn walk_secret_references(value: &serde_yml::Value, refs: &mut BTreeSet<String>) {
+    match value {
+        serde_yml::Value::String(s) => {
+            for expr in expression_blocks(s) {
+                if references_secret(expr) {
+                    refs.extend(secret_tokens(expr));
+                }
+            }
+        }
+        serde_yml::Value::Sequence(items) => {
+            for item in items {
+                walk_secret_references(item, refs);
+            }
+        }
+        serde_yml::Value::Mapping(map) => {
+            for (_, child) in map {
+                walk_secret_references(child, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn workflow_has_pr_trigger(workflow: &Workflow) -> bool {
+    workflow.triggers.pull_request.is_some() || workflow.triggers.pull_request_target.is_some()
 }
 
 fn evaluate_required_checks_complete(facts: &RepoFacts) -> RuleResult {

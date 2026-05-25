@@ -1403,6 +1403,218 @@ fn no_workflow_run_trigger_fails_irrespective_of_jobs_or_checkout() {
     ));
 }
 
+fn workflow_from_raw(path: &str, raw: &str) -> WorkflowFile {
+    WorkflowFile {
+        path: path.to_owned(),
+        workflow: serde_yml::from_str(raw).expect("test YAML parses"),
+        raw_yaml: Some(raw.to_owned()),
+    }
+}
+
+#[test]
+fn wf006_passes_when_no_pr_triggers() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/push.yml",
+        "name: Push\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: echo ${{ secrets.NPM_TOKEN }}\n",
+    )];
+
+    assert_eq!(
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts),
+        RuleResult::Pass,
+    );
+}
+
+#[test]
+fn wf006_passes_for_pr_workflow_with_no_secrets() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: cargo test\n",
+    )];
+
+    assert_eq!(
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts),
+        RuleResult::Pass,
+    );
+}
+
+#[test]
+fn wf006_fails_for_pull_request_step_env_secret() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: echo $NPM_TOKEN\n        \
+         env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
+    )];
+
+    let RuleResult::Fail { reason } =
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    else {
+        panic!("expected Fail");
+    };
+    assert!(reason.contains(".github/workflows/pr.yml"), "{reason}");
+    assert!(reason.contains("secrets.NPM_TOKEN"), "{reason}");
+}
+
+#[test]
+fn wf006_fails_for_pull_request_target_step_env_secret() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/prt.yml",
+        "name: PRT\non: pull_request_target\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: echo $NPM_TOKEN\n        \
+         env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
+    )];
+
+    assert!(matches!(
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn wf006_fails_for_secret_in_step_with_argument() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - uses: some/action@v1\n        \
+         with:\n          token: ${{ secrets.MY_TOKEN }}\n",
+    )];
+
+    let RuleResult::Fail { reason } =
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    else {
+        panic!("expected Fail");
+    };
+    assert!(reason.contains("secrets.MY_TOKEN"), "{reason}");
+}
+
+#[test]
+fn wf006_fails_for_secret_in_run_script() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: \"echo ${{ secrets.FOO }}\"\n",
+    )];
+
+    assert!(matches!(
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn wf006_fails_for_workflow_level_env_secret() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\nenv:\n  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n\
+         jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr list\n",
+    )];
+
+    let RuleResult::Fail { reason } =
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    else {
+        panic!("expected Fail");
+    };
+    assert!(reason.contains("secrets.GITHUB_TOKEN"), "{reason}");
+}
+
+#[test]
+fn wf006_fails_for_secret_in_step_if_condition() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - if: ${{ secrets.SOMETHING != '' }}\n        run: echo hi\n",
+    )];
+
+    assert!(matches!(
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn wf006_ignores_outputs_secrets_member_access() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: echo ${{ steps.x.outputs.secrets }}\n",
+    )];
+
+    assert_eq!(
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts),
+        RuleResult::Pass,
+    );
+}
+
+#[test]
+fn wf006_skips_when_raw_yaml_unavailable_on_pr_workflow() {
+    let mut facts = base_facts();
+    facts.workflows = vec![WorkflowFile {
+        path: ".github/workflows/pr.yml".to_owned(),
+        raw_yaml: None,
+        workflow: Workflow {
+            name: Some("PR".to_owned()),
+            triggers: Triggers {
+                push: None,
+                pull_request: Some(TriggerFilter::default()),
+                pull_request_target: None,
+                workflow_run: None,
+                workflow_dispatch: None,
+            },
+            jobs: BTreeMap::new(),
+        },
+    }];
+
+    let RuleResult::Skip { reason } =
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    else {
+        panic!("expected Skip");
+    };
+    assert!(reason.contains(".github/workflows/pr.yml"), "{reason}");
+}
+
+#[test]
+fn wf006_fail_dominates_skip() {
+    let mut facts = base_facts();
+    facts.workflows = vec![
+        workflow_from_raw(
+            ".github/workflows/leaky.yml",
+            "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+             steps:\n      - run: echo ${{ secrets.FOO }}\n",
+        ),
+        WorkflowFile {
+            path: ".github/workflows/unreadable.yml".to_owned(),
+            raw_yaml: None,
+            workflow: Workflow {
+                name: None,
+                triggers: Triggers {
+                    push: None,
+                    pull_request: Some(TriggerFilter::default()),
+                    pull_request_target: None,
+                    workflow_run: None,
+                    workflow_dispatch: None,
+                },
+                jobs: BTreeMap::new(),
+            },
+        },
+    ];
+
+    assert!(matches!(
+        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
 #[test]
 fn good_snapshot_matches_expected_default_rule_results() {
     let facts = good_fixture();
@@ -1439,6 +1651,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("WF003".to_owned(), "pass"),
         ("WF004".to_owned(), "pass"),
         ("WF005".to_owned(), "pass"),
+        ("WF006".to_owned(), "pass"),
     ]);
 
     assert_eq!(actual, expected);
@@ -1480,6 +1693,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("WF003".to_owned(), "fail"),
         ("WF004".to_owned(), "fail"),
         ("WF005".to_owned(), "fail"),
+        ("WF006".to_owned(), "fail"),
     ]);
 
     assert_eq!(actual, expected);

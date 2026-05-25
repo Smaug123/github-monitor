@@ -84,6 +84,11 @@ pub fn default_rules() -> Vec<Rule> {
             "No workflow uses the workflow_run trigger",
             RuleKind::NoWorkflowRunTrigger,
         ),
+        Rule::new(
+            "WF006",
+            "No `secrets` references in PR-triggered workflows",
+            RuleKind::NoPullRequestSecretReferences,
+        ),
         Rule::new("NX001", "flake.nix exists", RuleKind::NixFlakeExists),
         Rule::new(
             "NX002",

@@ -76,10 +76,31 @@
         }
       },
       "raw_yaml": "name: Reusable Caller\non:\n  pull_request: {}\njobs:\n  call-release:\n    uses: example-org/shared/.github/workflows/release.yml@main\n"
+    },
+    {
+      "path": ".github/workflows/pr-secrets.yml",
+      "workflow": {
+        "name": "PR Secrets",
+        "on": {
+          "pull_request": {}
+        },
+        "jobs": {
+          "leak": {
+            "runs-on": "ubuntu-latest",
+            "steps": [
+              {
+                "run": "echo $NPM_TOKEN"
+              }
+            ]
+          }
+        }
+      },
+      "raw_yaml": "name: PR Secrets\non:\n  pull_request: {}\njobs:\n  leak:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo $NPM_TOKEN\n        env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
     }
   ],
   "files_present": [
     ".github/workflows/post-ci.yml",
+    ".github/workflows/pr-secrets.yml",
     ".github/workflows/reusable-caller.yml",
     ".github/workflows/unsafe.yml",
     "README.md"

@@ -111,6 +111,7 @@ pub enum RuleKind {
     WorkflowActionsPinnedToSha,
     NoPullRequestTargetWithCheckout,
     NoWorkflowRunTrigger,
+    NoPullRequestSecretReferences,
     WorkflowUsesAction {
         action: String,
     },
