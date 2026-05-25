@@ -696,6 +696,7 @@ mod tests {
             proptest::option::of(trigger_filter_strategy()),
             proptest::option::of(trigger_filter_strategy()),
             any::<bool>(),
+            any::<bool>(),
             proptest::collection::btree_map(
                 identifier(),
                 (
@@ -713,13 +714,22 @@ mod tests {
             ),
         )
             .prop_map(
-                |(name, push, pull_request, pull_request_target, workflow_dispatch, jobs)| {
+                |(
+                    name,
+                    push,
+                    pull_request,
+                    pull_request_target,
+                    workflow_run,
+                    workflow_dispatch,
+                    jobs,
+                )| {
                     Workflow {
                         name,
                         triggers: Triggers {
                             push,
                             pull_request,
                             pull_request_target,
+                            workflow_run: workflow_run.then_some(Default::default()),
                             workflow_dispatch: workflow_dispatch.then_some(Default::default()),
                         },
                         jobs,
@@ -873,6 +883,7 @@ mod tests {
                             paths: Vec::new(),
                         }),
                         pull_request_target: None,
+                        workflow_run: None,
                         workflow_dispatch: None,
                     },
                     jobs,

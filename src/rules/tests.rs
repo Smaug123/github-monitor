@@ -16,7 +16,7 @@ use crate::github::types::{
 use crate::types::{BranchName, RepoRef, RuleId};
 use crate::workflow::model::{
     ActionRef, ActionReference, ActionStep, Job, RunStep, Step, StepKind, TriggerFilter, Triggers,
-    Workflow, WorkflowDispatch,
+    Workflow, WorkflowDispatch, WorkflowRun,
 };
 
 fn reason() -> impl Strategy<Value = String> {
@@ -310,6 +310,7 @@ fn workflow_strategy() -> impl Strategy<Value = Workflow> {
         proptest::option::of(trigger_filter_strategy()),
         proptest::option::of(trigger_filter_strategy()),
         any::<bool>(),
+        any::<bool>(),
         proptest::collection::btree_map(
             identifier(),
             proptest::collection::vec(step_strategy(), 0..4),
@@ -317,12 +318,21 @@ fn workflow_strategy() -> impl Strategy<Value = Workflow> {
         ),
     )
         .prop_map(
-            |(name, push, pull_request, pull_request_target, workflow_dispatch, jobs)| Workflow {
+            |(
+                name,
+                push,
+                pull_request,
+                pull_request_target,
+                workflow_run,
+                workflow_dispatch,
+                jobs,
+            )| Workflow {
                 name,
                 triggers: Triggers {
                     push,
                     pull_request,
                     pull_request_target,
+                    workflow_run: workflow_run.then_some(WorkflowRun::default()),
                     workflow_dispatch: workflow_dispatch.then_some(WorkflowDispatch::default()),
                 },
                 jobs: jobs
@@ -423,6 +433,7 @@ fn rule_kind_strategy() -> impl Strategy<Value = RuleKind> {
         identifier().prop_map(|job_name| RuleKind::WorkflowHasJob { job_name }),
         Just(RuleKind::WorkflowActionsPinnedToSha),
         Just(RuleKind::NoPullRequestTargetWithCheckout),
+        Just(RuleKind::NoWorkflowRunTrigger),
         (identifier(), identifier()).prop_map(|(owner, repo)| RuleKind::WorkflowUsesAction {
             action: format!("{owner}/{repo}"),
         }),
@@ -569,6 +580,7 @@ fn workflow_with_single_job(job_name: &str, steps: Vec<Step>) -> WorkflowFile {
                 }),
                 pull_request: None,
                 pull_request_target: None,
+                workflow_run: None,
                 workflow_dispatch: None,
             },
             jobs: BTreeMap::from([(
@@ -1083,6 +1095,7 @@ fn workflow_exists_for_default_branch_respects_single_star_slash_boundaries() {
                 }),
                 pull_request: None,
                 pull_request_target: None,
+                workflow_run: None,
                 workflow_dispatch: None,
             },
             jobs: BTreeMap::new(),
@@ -1114,6 +1127,7 @@ fn workflow_exists_for_default_branch_supports_double_star_and_negation_order() 
                 }),
                 pull_request: None,
                 pull_request_target: None,
+                workflow_run: None,
                 workflow_dispatch: None,
             },
             jobs: BTreeMap::new(),
@@ -1144,6 +1158,7 @@ fn workflow_exists_for_default_branch_respects_branches_ignore() {
                 }),
                 pull_request: None,
                 pull_request_target: None,
+                workflow_run: None,
                 workflow_dispatch: None,
             },
             jobs: BTreeMap::new(),
@@ -1200,6 +1215,7 @@ fn workflow_exists_for_default_branch_ignores_tags_only_push_workflows() {
                 }),
                 pull_request: None,
                 pull_request_target: None,
+                workflow_run: None,
                 workflow_dispatch: None,
             },
             jobs: BTreeMap::new(),
@@ -1224,6 +1240,76 @@ fn workflow_actions_pinned_to_sha_fails_for_subdir_action_with_at_in_ref() {
 
     assert!(matches!(
         evaluate(&RuleKind::WorkflowActionsPinnedToSha, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn no_workflow_run_trigger_passes_when_absent() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_with_single_job("build", vec![run_step("cargo test")])];
+
+    assert_eq!(
+        evaluate(&RuleKind::NoWorkflowRunTrigger, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn no_workflow_run_trigger_fails_when_present() {
+    let mut facts = base_facts();
+    facts.workflows = vec![WorkflowFile {
+        path: ".github/workflows/post-ci.yml".to_owned(),
+        raw_yaml: None,
+        workflow: Workflow {
+            name: Some("Post-CI".to_owned()),
+            triggers: Triggers {
+                push: None,
+                pull_request: None,
+                pull_request_target: None,
+                workflow_run: Some(WorkflowRun::default()),
+                workflow_dispatch: None,
+            },
+            jobs: BTreeMap::new(),
+        },
+    }];
+
+    let RuleResult::Fail { reason } = evaluate(&RuleKind::NoWorkflowRunTrigger, &facts) else {
+        panic!("expected Fail");
+    };
+    assert!(
+        reason.contains(".github/workflows/post-ci.yml"),
+        "reason should name the offending workflow: {reason}",
+    );
+}
+
+#[test]
+fn no_workflow_run_trigger_fails_irrespective_of_jobs_or_checkout() {
+    let mut facts = base_facts();
+    facts.workflows = vec![WorkflowFile {
+        path: ".github/workflows/empty-but-workflow-run.yml".to_owned(),
+        raw_yaml: None,
+        workflow: Workflow {
+            name: None,
+            triggers: Triggers {
+                push: Some(TriggerFilter {
+                    branches: vec!["main".to_owned()],
+                    branches_ignore: Vec::new(),
+                    tags: Vec::new(),
+                    tags_ignore: Vec::new(),
+                    paths: Vec::new(),
+                }),
+                pull_request: None,
+                pull_request_target: None,
+                workflow_run: Some(WorkflowRun::default()),
+                workflow_dispatch: None,
+            },
+            jobs: BTreeMap::new(),
+        },
+    }];
+
+    assert!(matches!(
+        evaluate(&RuleKind::NoWorkflowRunTrigger, &facts),
         RuleResult::Fail { .. }
     ));
 }
@@ -1263,6 +1349,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("WF002".to_owned(), "pass"),
         ("WF003".to_owned(), "pass"),
         ("WF004".to_owned(), "pass"),
+        ("WF005".to_owned(), "pass"),
     ]);
 
     assert_eq!(actual, expected);
@@ -1303,6 +1390,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("WF002".to_owned(), "fail"),
         ("WF003".to_owned(), "fail"),
         ("WF004".to_owned(), "fail"),
+        ("WF005".to_owned(), "fail"),
     ]);
 
     assert_eq!(actual, expected);
@@ -1497,6 +1585,7 @@ fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> Workfl
                 }),
                 pull_request: None,
                 pull_request_target: None,
+                workflow_run: None,
                 workflow_dispatch: None,
             },
             jobs: BTreeMap::from([(
@@ -1647,6 +1736,7 @@ fn workflow_has_required_checks_complete_passes_when_one_of_many_jobs_matches() 
                     push: None,
                     pull_request: None,
                     pull_request_target: None,
+                    workflow_run: None,
                     workflow_dispatch: None,
                 },
                 jobs: BTreeMap::from([(

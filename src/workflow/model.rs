@@ -26,6 +26,8 @@ pub struct Triggers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_target: Option<TriggerFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run: Option<WorkflowRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_dispatch: Option<WorkflowDispatch>,
 }
 
@@ -74,6 +76,7 @@ impl Triggers {
                 "pull_request_target" => {
                     triggers.pull_request_target = Some(TriggerFilter::default())
                 }
+                "workflow_run" => triggers.workflow_run = Some(WorkflowRun::default()),
                 "workflow_dispatch" => {
                     triggers.workflow_dispatch = Some(WorkflowDispatch::default())
                 }
@@ -94,6 +97,10 @@ impl Triggers {
             pull_request_target: parse_optional_default(
                 mapping_value(&mapping, "pull_request_target"),
                 "pull_request_target",
+            )?,
+            workflow_run: parse_optional_default(
+                mapping_value(&mapping, "workflow_run"),
+                "workflow_run",
             )?,
             workflow_dispatch: parse_optional_default(
                 mapping_value(&mapping, "workflow_dispatch"),
@@ -141,6 +148,9 @@ pub struct TriggerFilter {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkflowDispatch {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkflowRun {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Job {
@@ -435,13 +445,17 @@ mod tests {
             proptest::option::of(trigger_filter_strategy()),
             proptest::option::of(trigger_filter_strategy()),
             any::<bool>(),
+            any::<bool>(),
         )
             .prop_map(
-                |(push, pull_request, pull_request_target, workflow_dispatch)| Triggers {
-                    push,
-                    pull_request,
-                    pull_request_target,
-                    workflow_dispatch: workflow_dispatch.then_some(WorkflowDispatch::default()),
+                |(push, pull_request, pull_request_target, workflow_run, workflow_dispatch)| {
+                    Triggers {
+                        push,
+                        pull_request,
+                        pull_request_target,
+                        workflow_run: workflow_run.then_some(WorkflowRun::default()),
+                        workflow_dispatch: workflow_dispatch.then_some(WorkflowDispatch::default()),
+                    }
                 },
             )
     }
@@ -676,6 +690,51 @@ jobs:
             deploy.condition.as_deref(),
             Some("github.ref == 'refs/heads/main'")
         );
+    }
+
+    #[test]
+    fn parses_workflow_run_string_trigger() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on: workflow_run
+jobs: {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(workflow.triggers.workflow_run, Some(WorkflowRun::default()));
+    }
+
+    #[test]
+    fn parses_workflow_run_in_list() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on:
+  - push
+  - workflow_run
+jobs: {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(workflow.triggers.push, Some(TriggerFilter::default()));
+        assert_eq!(workflow.triggers.workflow_run, Some(WorkflowRun::default()));
+    }
+
+    #[test]
+    fn parses_workflow_run_map_trigger() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs: {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(workflow.triggers.workflow_run, Some(WorkflowRun::default()));
     }
 
     #[test]

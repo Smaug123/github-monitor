@@ -2113,6 +2113,7 @@ mod tests {
                     push: None,
                     pull_request: None,
                     pull_request_target: None,
+                    workflow_run: None,
                     workflow_dispatch: Some(WorkflowDispatch::default()),
                 },
                 jobs: BTreeMap::from([(
@@ -2155,7 +2156,7 @@ mod tests {
             .map(|fix| (fix.rule_id.to_string(), fix))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(fixes.len(), 24);
+        assert_eq!(fixes.len(), 25);
         assert_eq!(
             by_rule_id["ST001"].plan,
             FixPlan::Effect(FixEffect::SetRepositorySetting {
@@ -2207,6 +2208,12 @@ mod tests {
         );
         assert_eq!(
             by_rule_id["WF003"].planned_report().status,
+            FixStatus::Rejected {
+                reason: "automatic fixes for this rule are not implemented yet".to_owned(),
+            }
+        );
+        assert_eq!(
+            by_rule_id["WF005"].planned_report().status,
             FixStatus::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
             }
