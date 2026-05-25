@@ -2032,6 +2032,9 @@ fn apply_repo_setting_update(update: &mut RepositoryUpdate, setting: &RepoSettin
         RepoSetting::ForkPrApprovalPolicy => {
             unreachable!("fork PR contributor approval policy is not configurable via PATCH /repos")
         }
+        RepoSetting::DefaultWorkflowPermissions => {
+            unreachable!("default workflow permissions are not configurable via PATCH /repos")
+        }
     }
 }
 
@@ -2087,6 +2090,8 @@ mod tests {
                 allow_merge_commit: true,
                 allow_rebase_merge: false,
                 fork_pr_approval_policy: None,
+                default_workflow_permissions:
+                    crate::github::types::DefaultWorkflowPermissions::Read,
             },
             rulesets: Vec::new(),
             legacy_branch_protection: None,
@@ -2208,7 +2213,7 @@ mod tests {
             .map(|fix| (fix.rule_id.to_string(), fix))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(fixes.len(), 27);
+        assert_eq!(fixes.len(), 28);
         assert_eq!(
             by_rule_id["ST001"].plan,
             FixPlan::Effect(FixEffect::SetRepositorySetting {

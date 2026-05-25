@@ -1,5 +1,5 @@
 use crate::config::{RepoConfig, Visibility};
-use crate::github::types::{ForkPrApprovalPolicy, MergeMethod};
+use crate::github::types::{DefaultWorkflowPermissions, ForkPrApprovalPolicy, MergeMethod};
 
 use super::{RepoSetting, Rule, RuleKind, SettingValue};
 
@@ -159,6 +159,16 @@ pub fn default_rules() -> Vec<Rule> {
             "Default branch is named `main`",
             RuleKind::DefaultBranchNameIs {
                 name: "main".to_owned(),
+            },
+        ),
+        Rule::new(
+            "ST010",
+            "GITHUB_TOKEN defaults to read-only workflow permissions",
+            RuleKind::RepoSettingMatch {
+                setting: RepoSetting::DefaultWorkflowPermissions,
+                expected: SettingValue::DefaultWorkflowPermissions(
+                    DefaultWorkflowPermissions::Read,
+                ),
             },
         ),
         Rule::new(

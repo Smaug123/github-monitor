@@ -20,7 +20,7 @@ use crate::github::types::{
     BranchProtection, CommitRef, CreateGitReference, CreatePullRequest, ForkPrApprovalPermission,
     ForkPrApprovalPolicy, GitReference, GitTree, PullRequest, Repository, RepositoryContents,
     RepositoryDirectoryEntry, RepositoryFileContent, RepositoryUpdate, Ruleset,
-    UpdateRepositoryFile, UpdateRulesetRequest,
+    UpdateRepositoryFile, UpdateRulesetRequest, WorkflowPermissions,
 };
 use crate::types::{BranchName, RepoRef};
 
@@ -266,6 +266,19 @@ impl GitHubClient {
             repo,
             &format!(
                 "{}/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
+                self.api_base_url
+            ),
+        )
+    }
+
+    pub fn get_workflow_permissions(
+        &mut self,
+        repo: &RepoRef,
+    ) -> Result<WorkflowPermissions, GitHubClientError> {
+        self.get_json(
+            repo,
+            &format!(
+                "{}/repos/{repo}/actions/permissions/workflow",
                 self.api_base_url
             ),
         )
@@ -1268,6 +1281,30 @@ mod tests {
             Some(crate::github::types::LegacyEnabledFlag { enabled: true })
         );
         assert!(protection.required_status_checks.is_none());
+    }
+
+    #[test]
+    fn get_workflow_permissions_parses_payload() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/actions/permissions/workflow",
+            200,
+            r#"{"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}"#,
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let permissions = client
+            .get_workflow_permissions(&RepoRef::new("owner", "repo"))
+            .unwrap();
+
+        assert_eq!(
+            permissions,
+            WorkflowPermissions {
+                default_workflow_permissions:
+                    crate::github::types::DefaultWorkflowPermissions::Read,
+                can_approve_pull_request_reviews: false,
+            }
+        );
     }
 
     #[test]
