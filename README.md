@@ -244,6 +244,7 @@ The default rule set is currently fixed in code.
 | `WF001` | At least one workflow runs on pushes to the default branch |
 | `WF002` | GitHub Actions references are pinned to 40-character commit SHAs |
 | `WF003` | `pull_request_target` workflows do not use `actions/checkout` |
+| `WF005` | No workflow uses the `workflow_run` trigger |
 | `NX001` | `flake.nix` exists |
 | `NX002` | The flake has observable check coverage |
 | `ST001` | `allow_auto_merge = true` |

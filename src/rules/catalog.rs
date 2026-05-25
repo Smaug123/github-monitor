@@ -79,6 +79,11 @@ pub fn default_rules() -> Vec<Rule> {
             "Workflow has an all-required-checks-complete aggregator job",
             RuleKind::WorkflowHasRequiredChecksComplete,
         ),
+        Rule::new(
+            "WF005",
+            "No workflow uses the workflow_run trigger",
+            RuleKind::NoWorkflowRunTrigger,
+        ),
         Rule::new("NX001", "flake.nix exists", RuleKind::NixFlakeExists),
         Rule::new(
             "NX002",

@@ -41,9 +41,30 @@
         }
       },
       "raw_yaml": "name: Unsafe CI\non:\n  pull_request_target: {}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo unsafe\n"
+    },
+    {
+      "path": ".github/workflows/post-ci.yml",
+      "workflow": {
+        "name": "Post-CI",
+        "on": {
+          "workflow_run": {}
+        },
+        "jobs": {
+          "audit": {
+            "runs-on": "ubuntu-latest",
+            "steps": [
+              {
+                "run": "echo audit"
+              }
+            ]
+          }
+        }
+      },
+      "raw_yaml": "name: Post-CI\non:\n  workflow_run: {}\njobs:\n  audit:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo audit\n"
     }
   ],
   "files_present": [
+    ".github/workflows/post-ci.yml",
     ".github/workflows/unsafe.yml",
     "README.md"
   ]

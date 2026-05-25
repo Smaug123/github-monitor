@@ -98,6 +98,26 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
+        RuleKind::NoWorkflowRunTrigger => {
+            let offenders = facts
+                .workflows
+                .iter()
+                .filter(|workflow_file| workflow_file.workflow.triggers.workflow_run.is_some())
+                .map(|workflow_file| workflow_file.path.clone())
+                .collect::<Vec<_>>();
+
+            if offenders.is_empty() {
+                RuleResult::Pass
+            } else {
+                RuleResult::Fail {
+                    reason: format!(
+                        "workflow_run grants write permissions and secrets to runs from \
+                         potentially fork-authored upstream events; do not use this trigger: {}",
+                        offenders.join(", ")
+                    ),
+                }
+            }
+        }
         RuleKind::WorkflowUsesAction { action } => {
             if facts
                 .workflows
