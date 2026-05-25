@@ -428,7 +428,7 @@ pub fn plan_repo_fixes(rules: &[Rule], facts: &RepoFacts) -> Vec<PlannedFix> {
     planned
 }
 
-/// Population planners (RS002/RS012/RS013 and friends) emit fixes targeting the
+/// Population planners (RS012/RS013 and friends) emit fixes targeting the
 /// pending default-branch ruleset whenever no live ruleset covers it, leaving
 /// the actual creation to RS001's `CreateDefaultBranchRuleset` effect. If RS001
 /// is not in the batch — either disabled or already passing — those fixes have
@@ -1017,7 +1017,13 @@ fn create_default_branch_ruleset(
 fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRulesetUpdate) {
     for rule in &queued.rules_to_add {
         if !rules.iter().any(|existing| existing.kind == rule.kind) {
-            rules.push(rule.clone());
+            let to_push = if rule.kind == RulesetRuleType::PullRequest && rule.parameters.is_none()
+            {
+                new_pull_request_rule_with_required_defaults()
+            } else {
+                rule.clone()
+            };
+            rules.push(to_push);
         }
     }
 
@@ -1028,10 +1034,7 @@ fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRules
         {
             Some(rule) => rule,
             None => {
-                rules.push(RulesetRule {
-                    kind: RulesetRuleType::PullRequest,
-                    parameters: None,
-                });
+                rules.push(new_pull_request_rule_with_required_defaults());
                 rules.last_mut().expect("just pushed")
             }
         };
@@ -1077,6 +1080,24 @@ fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRules
                     });
             }
         }
+    }
+}
+
+/// Builds a fresh `pull_request` rule with the parameters GitHub's
+/// create-ruleset endpoint requires. Sending the rule without these fields
+/// causes a 422 ("data matches no possible input"). All defaults are
+/// permissive — explicit rules (e.g. RS011) override them.
+fn new_pull_request_rule_with_required_defaults() -> RulesetRule {
+    RulesetRule {
+        kind: RulesetRuleType::PullRequest,
+        parameters: Some(RulesetRuleParameters {
+            required_approving_review_count: Some(0),
+            dismiss_stale_reviews_on_push: Some(false),
+            require_code_owner_review: Some(false),
+            require_last_push_approval: Some(false),
+            required_review_thread_resolution: Some(false),
+            ..RulesetRuleParameters::default()
+        }),
     }
 }
 
@@ -2134,7 +2155,7 @@ mod tests {
             .map(|fix| (fix.rule_id.to_string(), fix))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(fixes.len(), 25);
+        assert_eq!(fixes.len(), 24);
         assert_eq!(
             by_rule_id["ST001"].plan,
             FixPlan::Effect(FixEffect::SetRepositorySetting {
@@ -3575,7 +3596,7 @@ mod tests {
     fn set_strict_required_status_checks_fix_targets_ruleset_when_status_check_rule_absent() {
         // RS013 should plan an effect even when the ruleset has no
         // required_status_checks rule yet. The apply step creates the rule
-        // (with strict=true and an empty checks list); RS002/RS012 fixes that
+        // (with strict=true and an empty checks list); RS012 fixes that
         // batch alongside RS013 will populate the checks list.
         let mut facts = base_facts();
         facts.rulesets = vec![ruleset_for_default_branch(
@@ -3779,16 +3800,6 @@ mod tests {
         assert_eq!(executed[1].status, FixStatus::Applied);
     }
 
-    fn rs002_rule() -> Rule {
-        Rule::new(
-            "RS002",
-            "CI status check is required",
-            RuleKind::RulesetRequiresStatusCheck {
-                check_name: "ci".to_owned(),
-            },
-        )
-    }
-
     fn rs012_rule() -> Rule {
         Rule::new(
             "RS012",
@@ -3808,7 +3819,7 @@ mod tests {
             Vec::new(),
         )];
 
-        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
         assert_eq!(fixes.len(), 1);
         assert_eq!(
@@ -3819,12 +3830,12 @@ mod tests {
                     id: 42,
                     name: "main protection".to_owned(),
                 },
-                context: "ci".to_owned(),
+                context: "all-required-checks-complete".to_owned(),
             })
         );
         assert_eq!(
             fixes[0].planned_report().description,
-            "require status check `ci` on ruleset `main protection`"
+            "require status check `all-required-checks-complete` on ruleset `main protection`"
         );
     }
 
@@ -3846,7 +3857,7 @@ mod tests {
             }],
         )];
 
-        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
         assert_eq!(fixes.len(), 1);
         assert_eq!(
@@ -3857,7 +3868,7 @@ mod tests {
                     id: 42,
                     name: "main protection".to_owned(),
                 },
-                context: "ci".to_owned(),
+                context: "all-required-checks-complete".to_owned(),
             })
         );
     }
@@ -3872,7 +3883,7 @@ mod tests {
                 kind: RulesetRuleType::RequiredStatusChecks,
                 parameters: Some(RulesetRuleParameters {
                     required_status_checks: vec![crate::github::types::RequiredStatusCheck {
-                        context: "ci".to_owned(),
+                        context: "all-required-checks-complete".to_owned(),
                         integration_id: None,
                     }],
                     ..RulesetRuleParameters::default()
@@ -3880,7 +3891,7 @@ mod tests {
             }],
         )];
 
-        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
         assert!(
             fixes.is_empty(),
@@ -3892,7 +3903,7 @@ mod tests {
     fn ensure_required_status_check_fix_rejects_when_no_ruleset_exists() {
         let facts = base_facts();
 
-        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
         assert_eq!(fixes.len(), 1);
         match &fixes[0].plan {
@@ -3915,14 +3926,14 @@ mod tests {
             ruleset_for_default_branch(2, "extra protection", Vec::new()),
         ];
 
-        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
         assert_eq!(fixes.len(), 1);
         match &fixes[0].plan {
             FixPlan::Rejected { reason } => {
                 assert!(reason.contains("`main protection`"), "reason: {reason}");
                 assert!(reason.contains("`extra protection`"), "reason: {reason}");
-                assert!(reason.contains("`ci`"));
+                assert!(reason.contains("`all-required-checks-complete`"));
             }
             other => panic!("expected rejection, got {other:?}"),
         }
@@ -3946,7 +3957,7 @@ mod tests {
                 }),
             }],
         )];
-        let fixes = plan_repo_fixes(&[rs002_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
         let server = TestServer::spawn(vec![
             ExpectedRequest::json(
@@ -3971,7 +3982,7 @@ mod tests {
                         .collect();
                     assert_eq!(
                         contexts,
-                        ["ci", "other"].into_iter().collect()
+                        ["all-required-checks-complete", "other"].into_iter().collect()
                     );
                     // The existing integration_id on "other" must be preserved.
                     let other_check = checks
@@ -3997,18 +4008,18 @@ mod tests {
     }
 
     #[test]
-    fn execute_repo_fixes_batches_rs002_rs012_rs013_into_one_ruleset_put() {
-        // This is the robocop case: the ruleset has no required_status_checks
-        // rule at all. RS002, RS012, RS013 all fail. The auto-fix must
-        // create the rule in a single PUT with both contexts and strict=true.
+    fn execute_repo_fixes_batches_rs012_rs013_into_one_ruleset_put() {
+        // The ruleset has no required_status_checks rule at all. RS012 and
+        // RS013 both fail. The auto-fix must create the rule in a single PUT
+        // with the context and strict=true.
         let mut facts = base_facts();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
             Vec::new(),
         )];
-        let fixes = plan_repo_fixes(&[rs002_rule(), rs012_rule(), rs013_rule()], &facts);
-        assert_eq!(fixes.len(), 3);
+        let fixes = plan_repo_fixes(&[rs012_rule(), rs013_rule()], &facts);
+        assert_eq!(fixes.len(), 2);
 
         let server = TestServer::spawn(vec![
             ExpectedRequest::json(
@@ -4035,7 +4046,7 @@ mod tests {
                         .collect();
                     assert_eq!(
                         contexts,
-                        ["all-required-checks-complete", "ci"].into_iter().collect()
+                        ["all-required-checks-complete"].into_iter().collect()
                     );
                 },
                 r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[]}"#
@@ -4049,10 +4060,9 @@ mod tests {
 
         let executed = execute_repo_fixes(&mut client, &fixes);
 
-        assert_eq!(executed.len(), 3);
+        assert_eq!(executed.len(), 2);
         assert_eq!(executed[0].status, FixStatus::Applied);
         assert_eq!(executed[1].status, FixStatus::Applied);
-        assert_eq!(executed[2].status, FixStatus::Applied);
     }
 
     fn st007_rule() -> Rule {
@@ -4352,9 +4362,9 @@ mod tests {
     }
 
     #[test]
-    fn rs001_plus_rs002_rs013_plan_pending_default_branch_targets() {
+    fn rs001_plus_rs012_rs013_plan_pending_default_branch_targets() {
         let facts = base_facts();
-        let fixes = plan_repo_fixes(&[rs001_rule(), rs002_rule(), rs013_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs001_rule(), rs012_rule(), rs013_rule()], &facts);
 
         let by_rule_id: BTreeMap<_, _> = fixes
             .iter()
@@ -4372,14 +4382,14 @@ mod tests {
             })
         );
         assert_eq!(
-            by_rule_id["RS002"].plan,
+            by_rule_id["RS012"].plan,
             FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
                 repo: facts.repo.clone(),
                 target: PlannedRulesetTarget::PendingDefaultBranch {
                     default_branch: facts.default_branch.clone(),
                     name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
                 },
-                context: "ci".to_owned(),
+                context: "all-required-checks-complete".to_owned(),
             })
         );
         assert_eq!(
@@ -4395,9 +4405,9 @@ mod tests {
     }
 
     #[test]
-    fn execute_repo_fixes_batches_rs001_rs002_rs013_into_one_creation_post() {
+    fn execute_repo_fixes_batches_rs001_rs012_rs013_into_one_creation_post() {
         let facts = base_facts();
-        let fixes = plan_repo_fixes(&[rs001_rule(), rs002_rule(), rs013_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs001_rule(), rs012_rule(), rs013_rule()], &facts);
         assert_eq!(fixes.len(), 3);
 
         let server = TestServer::spawn(vec![ExpectedRequest::json(
@@ -4421,7 +4431,62 @@ mod tests {
                     .iter()
                     .map(|check| check["context"].as_str().unwrap())
                     .collect();
-                assert_eq!(contexts, ["ci"].into_iter().collect());
+                assert_eq!(contexts, ["all-required-checks-complete"].into_iter().collect());
+            },
+            r#"{"id":99,"name":"github-infra: default branch protection","target":"branch","enforcement":"active"}"#.to_owned(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 3);
+        for fix in &executed {
+            assert_eq!(
+                fix.status,
+                FixStatus::Applied,
+                "rule {} expected Applied, got {:?}",
+                fix.rule_id,
+                fix.status
+            );
+        }
+    }
+
+    #[test]
+    fn creation_post_supplies_required_defaults_for_new_pull_request_rule() {
+        // Reproduces the live 422 we hit: GitHub's create-ruleset endpoint
+        // rejects a pull_request rule that omits required_approving_review_count
+        // and the dismiss/require_* booleans, even when only allowed_merge_methods
+        // is being set. The autofix must supply permissive defaults.
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[rs001_rule(), rs010_rule(), rs011_rule()], &facts);
+        assert_eq!(fixes.len(), 3);
+
+        let server = TestServer::spawn(vec![ExpectedRequest::json(
+            "POST",
+            "/repos/example-org/repo/rulesets",
+            |body| {
+                let value: serde_json::Value = serde_json::from_str(body).unwrap();
+                let rules = value["rules"].as_array().unwrap();
+                let pr_rule = rules
+                    .iter()
+                    .find(|rule| rule["type"] == "pull_request")
+                    .expect("expected pull_request rule in body");
+                let params = &pr_rule["parameters"];
+                assert_eq!(params["required_approving_review_count"], 0);
+                assert_eq!(params["dismiss_stale_reviews_on_push"], false);
+                assert_eq!(params["require_code_owner_review"], false);
+                assert_eq!(params["require_last_push_approval"], false);
+                assert_eq!(params["required_review_thread_resolution"], false);
+                let methods: Vec<&str> = params["allowed_merge_methods"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|method| method.as_str().unwrap())
+                    .collect();
+                assert_eq!(methods, vec!["squash"]);
             },
             r#"{"id":99,"name":"github-infra: default branch protection","target":"branch","enforcement":"active"}"#.to_owned(),
         )]);
@@ -4447,7 +4512,7 @@ mod tests {
     #[test]
     fn population_rules_rejected_when_rs001_absent_and_no_ruleset_exists() {
         let facts = base_facts();
-        let fixes = plan_repo_fixes(&[rs002_rule(), rs013_rule()], &facts);
+        let fixes = plan_repo_fixes(&[rs012_rule(), rs013_rule()], &facts);
 
         assert_eq!(fixes.len(), 2);
         for fix in &fixes {

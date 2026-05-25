@@ -6,13 +6,6 @@ pub fn default_rules() -> Vec<Rule> {
     vec![
         Rule::new("RS001", "Rulesets exist", RuleKind::RulesetExists),
         Rule::new(
-            "RS002",
-            "CI status check is required",
-            RuleKind::RulesetRequiresStatusCheck {
-                check_name: "ci".to_owned(),
-            },
-        ),
-        Rule::new(
             "RS004",
             "Organization admins or repository roles cannot bypass rulesets",
             RuleKind::RulesetEnforcesAdmins,
