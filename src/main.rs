@@ -11,7 +11,7 @@ mod workflow;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, RepoConfig};
 use crate::facts::{
     FactsError, RepoFacts, SnapshotError, gather_repo_facts, load_snapshot, save_snapshot,
 };
@@ -21,7 +21,7 @@ use crate::github::client::{GitHubClient, GitHubToken};
 use crate::loki::{DEFAULT_JOB_LABEL, LokiPushError};
 use crate::remediation::{PlannedFix, RepoFix, execute_repo_fixes, plan_repo_fixes};
 use crate::report::{OutputFormat, OutputFormatError, RepoReport, ReportError};
-use crate::rules::{default_rules, evaluate_rules};
+use crate::rules::{evaluate_rules, rules_for_repo};
 use crate::types::RepoRef;
 
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
@@ -77,7 +77,7 @@ fn run(args: CliArgs) -> Result<RunOutput, AppError> {
     let reports = match args.execution_mode {
         ExecutionMode::Plan => {
             let facts = load_facts(&config, &args.snapshot_mode)?;
-            evaluate_repo_reports(facts, build_planned_repo_fixes)
+            evaluate_repo_reports(facts, &config.repos, build_planned_repo_fixes)
         }
         ExecutionMode::Execute => execute_fix_run(&config, &args.snapshot_mode)?,
     };
@@ -153,13 +153,15 @@ fn execute_fix_run(
     let auth = github_auth_from_env()?;
     let mut client = GitHubClient::with_auth(auth);
     let initial_facts = gather_facts_from_github_with_client(&mut client, &repos)?;
-    let planned_fixes = plan_repo_fix_batches(&initial_facts);
+    let planned_fixes = plan_repo_fix_batches(&initial_facts, &config.repos);
 
     if planned_fixes.iter().all(Vec::is_empty) {
         save_facts_if_requested(snapshot_mode, &initial_facts)?;
-        return Ok(evaluate_repo_reports(initial_facts, |facts| {
-            vec![Vec::new(); facts.len()]
-        }));
+        return Ok(evaluate_repo_reports(
+            initial_facts,
+            &config.repos,
+            |facts, _| vec![Vec::new(); facts.len()],
+        ));
     }
 
     let executed_fixes = planned_fixes
@@ -169,9 +171,11 @@ fn execute_fix_run(
     let final_facts = gather_facts_from_github_with_client(&mut client, &repos)?;
     save_facts_if_requested(snapshot_mode, &final_facts)?;
 
-    Ok(evaluate_repo_reports(final_facts, move |_| {
-        executed_fixes.clone()
-    }))
+    Ok(evaluate_repo_reports(
+        final_facts,
+        &config.repos,
+        move |_, _| executed_fixes.clone(),
+    ))
 }
 
 fn save_facts_if_requested(
@@ -187,35 +191,44 @@ fn save_facts_if_requested(
     Ok(())
 }
 
-fn evaluate_repo_reports<F>(facts: Vec<RepoFacts>, repo_fixes: F) -> Vec<RepoReport>
+fn evaluate_repo_reports<F>(
+    facts: Vec<RepoFacts>,
+    repo_configs: &[RepoConfig],
+    repo_fixes: F,
+) -> Vec<RepoReport>
 where
-    F: FnOnce(&[RepoFacts]) -> Vec<Vec<RepoFix>>,
+    F: FnOnce(&[RepoFacts], &[RepoConfig]) -> Vec<Vec<RepoFix>>,
 {
-    let rules = default_rules();
-    let repo_fixes = repo_fixes(&facts);
+    debug_assert_eq!(facts.len(), repo_configs.len());
+    let repo_fixes = repo_fixes(&facts, repo_configs);
     debug_assert_eq!(facts.len(), repo_fixes.len());
 
-    std::iter::zip(facts, repo_fixes)
-        .map(|(repo_facts, fixes)| {
+    std::iter::zip(facts, repo_configs.iter().zip(repo_fixes))
+        .map(|(repo_facts, (repo_config, fixes))| {
+            let rules = rules_for_repo(repo_config);
             let outputs = evaluate_rules(&rules, &repo_facts);
             RepoReport::new(repo_facts.repo, outputs, fixes)
         })
         .collect()
 }
 
-fn build_planned_repo_fixes(facts: &[RepoFacts]) -> Vec<Vec<RepoFix>> {
-    plan_repo_fix_batches(facts)
+fn build_planned_repo_fixes(
+    facts: &[RepoFacts],
+    repo_configs: &[RepoConfig],
+) -> Vec<Vec<RepoFix>> {
+    plan_repo_fix_batches(facts, repo_configs)
         .into_iter()
         .map(|fixes| fixes.into_iter().map(|fix| fix.planned_report()).collect())
         .collect()
 }
 
-fn plan_repo_fix_batches(facts: &[RepoFacts]) -> Vec<Vec<PlannedFix>> {
-    let rules = default_rules();
-
-    facts
-        .iter()
-        .map(|repo_facts| plan_repo_fixes(&rules, repo_facts))
+fn plan_repo_fix_batches(
+    facts: &[RepoFacts],
+    repo_configs: &[RepoConfig],
+) -> Vec<Vec<PlannedFix>> {
+    debug_assert_eq!(facts.len(), repo_configs.len());
+    std::iter::zip(facts.iter(), repo_configs.iter())
+        .map(|(repo_facts, repo_config)| plan_repo_fixes(&rules_for_repo(repo_config), repo_facts))
         .collect()
 }
 

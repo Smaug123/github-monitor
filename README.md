@@ -74,6 +74,17 @@ owner = "example-org"
 name = "good-repo"
 ```
 
+Each repo entry also accepts an optional `visibility` field, used by `ST009` to enforce that the repo's actual public/private status matches the intended one:
+
+```toml
+[[repos]]
+owner = "example-org"
+name = "internal-service"
+visibility = "private"
+```
+
+`visibility` is `"public"` or `"private"`, and defaults to `"public"` when omitted. Capitalisation or any other string is rejected at parse time.
+
 The parser also accepts an optional `disabled_rules` field:
 
 ```toml
@@ -254,6 +265,7 @@ The default rule set is currently fixed in code.
 | `ST003` | `allow_update_branch = true` |
 | `ST004` | `allow_merge_commit = false` |
 | `ST005` | `allow_rebase_merge = true` |
+| `ST009` | Repository visibility matches the `visibility` field in config |
 
 ## Current Limitations
 
