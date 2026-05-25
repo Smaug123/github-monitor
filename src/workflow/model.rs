@@ -154,10 +154,6 @@ pub struct WorkflowRun {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Job {
-    #[serde(default, rename = "runs-on", skip_serializing_if = "Option::is_none")]
-    pub runs_on: Option<RunsOn>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub steps: Vec<Step>,
     #[serde(
         default,
         deserialize_with = "deserialize_string_or_vec",
@@ -166,6 +162,60 @@ pub struct Job {
     pub needs: Vec<String>,
     #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    #[serde(flatten)]
+    pub kind: JobKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JobKind {
+    Reusable(ReusableJob),
+    Standard(StandardJob),
+}
+
+impl Default for JobKind {
+    fn default() -> Self {
+        Self::Standard(StandardJob::default())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct StandardJob {
+    #[serde(default, rename = "runs-on", skip_serializing_if = "Option::is_none")]
+    pub runs_on: Option<RunsOn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Step>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReusableJob {
+    pub uses: ActionReference,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub with: BTreeMap<String, WithValue>,
+}
+
+impl Job {
+    pub fn uses(&self) -> Option<&ActionReference> {
+        match &self.kind {
+            JobKind::Reusable(reusable) => Some(&reusable.uses),
+            JobKind::Standard(_) => None,
+        }
+    }
+
+    pub fn steps(&self) -> &[Step] {
+        match &self.kind {
+            JobKind::Standard(standard) => &standard.steps,
+            JobKind::Reusable(_) => &[],
+        }
+    }
+
+    #[cfg(test)]
+    pub fn runs_on(&self) -> Option<&RunsOn> {
+        match &self.kind {
+            JobKind::Standard(standard) => standard.runs_on.as_ref(),
+            JobKind::Reusable(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,18 +574,31 @@ mod tests {
     }
 
     fn job_strategy() -> impl Strategy<Value = Job> {
-        (
-            proptest::option::of(runs_on_strategy()),
-            proptest::collection::vec(step_strategy(), 0..4),
+        let standard = (
             proptest::collection::vec(identifier(), 0..3),
             proptest::option::of(path_fragment()),
+            proptest::option::of(runs_on_strategy()),
+            proptest::collection::vec(step_strategy(), 0..4),
         )
-            .prop_map(|(runs_on, steps, needs, condition)| Job {
-                runs_on,
-                steps,
+            .prop_map(|(needs, condition, runs_on, steps)| Job {
                 needs,
                 condition,
-            })
+                kind: JobKind::Standard(StandardJob { runs_on, steps }),
+            });
+
+        let reusable = (
+            proptest::collection::vec(identifier(), 0..3),
+            proptest::option::of(path_fragment()),
+            action_reference_strategy(),
+            proptest::collection::btree_map(identifier(), with_value_strategy(), 0..3),
+        )
+            .prop_map(|(needs, condition, uses, with)| Job {
+                needs,
+                condition,
+                kind: JobKind::Reusable(ReusableJob { uses, with }),
+            });
+
+        prop_oneof![standard, reusable]
     }
 
     fn workflow_strategy() -> impl Strategy<Value = Workflow> {
@@ -663,15 +726,15 @@ jobs:
 
         let build = workflow.jobs.get("build").unwrap();
         assert_eq!(
-            build.runs_on,
-            Some(RunsOn::Label("ubuntu-latest".to_owned()))
+            build.runs_on(),
+            Some(&RunsOn::Label("ubuntu-latest".to_owned()))
         );
-        assert_eq!(build.steps.first().unwrap().run(), Some("cargo test"));
+        assert_eq!(build.steps().first().unwrap().run(), Some("cargo test"));
 
         let self_hosted_build = workflow.jobs.get("self-hosted-build").unwrap();
         assert_eq!(
-            self_hosted_build.runs_on,
-            Some(RunsOn::Labels(vec![
+            self_hosted_build.runs_on(),
+            Some(&RunsOn::Labels(vec![
                 "self-hosted".to_owned(),
                 "linux".to_owned(),
             ]))
@@ -679,8 +742,8 @@ jobs:
 
         let deploy = workflow.jobs.get("deploy").unwrap();
         assert_eq!(
-            deploy.runs_on,
-            Some(RunsOn::Group(RunsOnGroup {
+            deploy.runs_on(),
+            Some(&RunsOn::Group(RunsOnGroup {
                 group: Some("release-runners".to_owned()),
                 labels: vec!["linux".to_owned()],
             }))
@@ -735,6 +798,79 @@ jobs: {}
         .unwrap();
 
         assert_eq!(workflow.triggers.workflow_run, Some(WorkflowRun::default()));
+    }
+
+    #[test]
+    fn parses_reusable_job() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on: push
+jobs:
+  call-shared:
+    uses: foo/bar/.github/workflows/x.yml@v1
+"#,
+        )
+        .unwrap();
+
+        let job = workflow.jobs.get("call-shared").unwrap();
+        let uses = job.uses().unwrap();
+        assert_eq!(
+            uses,
+            &ActionReference::Other("foo/bar/.github/workflows/x.yml@v1".to_owned())
+        );
+        assert!(job.steps().is_empty());
+        assert!(job.runs_on().is_none());
+        assert!(matches!(job.kind, JobKind::Reusable(_)));
+    }
+
+    #[test]
+    fn parses_reusable_job_with_with() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on: push
+jobs:
+  call-shared:
+    uses: foo/bar/.github/workflows/x.yml@v1
+    with:
+      flag: true
+      label: release
+"#,
+        )
+        .unwrap();
+
+        let job = workflow.jobs.get("call-shared").unwrap();
+        let JobKind::Reusable(reusable) = &job.kind else {
+            panic!("expected reusable job, got {:?}", job.kind);
+        };
+        assert_eq!(reusable.with.get("flag"), Some(&WithValue::Bool(true)));
+        assert_eq!(
+            reusable.with.get("label"),
+            Some(&WithValue::String("release".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parses_standard_job_still_works() {
+        let workflow: Workflow = serde_yml::from_str(
+            r#"
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+"#,
+        )
+        .unwrap();
+
+        let job = workflow.jobs.get("build").unwrap();
+        assert!(matches!(job.kind, JobKind::Standard(_)));
+        assert!(job.uses().is_none());
+        assert_eq!(
+            job.runs_on(),
+            Some(&RunsOn::Label("ubuntu-latest".to_owned()))
+        );
+        assert_eq!(job.steps().first().unwrap().run(), Some("echo hi"));
     }
 
     #[test]
@@ -837,14 +973,14 @@ jobs:
         );
         let build = workflow.jobs.get("build").unwrap();
         assert_eq!(
-            build.runs_on,
-            Some(RunsOn::Group(RunsOnGroup {
+            build.runs_on(),
+            Some(&RunsOn::Group(RunsOnGroup {
                 group: Some("linux".to_owned()),
                 labels: Vec::new(),
             }))
         );
 
-        let step = build.steps.first().unwrap();
+        let step = build.steps().first().unwrap();
         let uses = step.uses().unwrap().as_action_ref().unwrap();
         assert_eq!(uses, &ActionRef::new("actions", "checkout", "v4"));
         assert_eq!(

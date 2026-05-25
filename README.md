@@ -242,7 +242,7 @@ The default rule set is currently fixed in code.
 | `RS006` | Active branch rulesets prevent force pushes |
 | `RS007` | The repo uses rulesets instead of legacy branch protection |
 | `WF001` | At least one workflow runs on pushes to the default branch |
-| `WF002` | GitHub Actions references are pinned to 40-character commit SHAs |
+| `WF002` | GitHub Actions and reusable workflow references are pinned to 40-character commit SHAs |
 | `WF003` | `pull_request_target` workflows do not use `actions/checkout` |
 | `WF005` | No workflow uses the `workflow_run` trigger |
 | `NX001` | `flake.nix` exists |

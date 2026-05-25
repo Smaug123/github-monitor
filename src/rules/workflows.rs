@@ -46,8 +46,11 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                         .workflow
                         .jobs
                         .values()
-                        .flat_map(|job| job.steps.iter())
-                        .filter_map(|step| step.uses())
+                        .flat_map(|job| {
+                            job.uses()
+                                .into_iter()
+                                .chain(job.steps().iter().filter_map(|step| step.uses()))
+                        })
                         .filter(|uses| !action_reference_is_pinned_to_sha(uses))
                         .map(|uses| {
                             format!(
@@ -176,7 +179,7 @@ fn evaluate_required_checks_complete(facts: &RepoFacts) -> RuleResult {
 fn required_checks_job_is_valid(job: &Job) -> bool {
     condition_is_always(job.condition.as_deref())
         && job
-            .steps
+            .steps()
             .iter()
             .any(|step| step_uses_action(step, REQUIRED_CHECKS_ACTION))
 }
@@ -192,7 +195,7 @@ fn describe_job_issues(job: &Job) -> String {
     }
 
     if !job
-        .steps
+        .steps()
         .iter()
         .any(|step| step_uses_action(step, REQUIRED_CHECKS_ACTION))
     {
@@ -237,7 +240,7 @@ fn workflow_uses_action(workflow: &Workflow, action: &str) -> bool {
     workflow
         .jobs
         .values()
-        .flat_map(|job| job.steps.iter())
+        .flat_map(|job| job.steps().iter())
         .any(|step| step_uses_action(step, action))
 }
 
