@@ -266,6 +266,7 @@ The default rule set is currently fixed in code.
 | `ST004` | `allow_merge_commit = false` |
 | `ST005` | `allow_rebase_merge = true` |
 | `ST009` | Repository visibility matches the `visibility` field in config |
+| `ST010` | `default_workflow_permissions = "read"` (GITHUB_TOKEN defaults to read-only) |
 
 ## Current Limitations
 

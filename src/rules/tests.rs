@@ -8,11 +8,11 @@ use super::*;
 use crate::config::{RepoConfig, Visibility};
 use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
-    BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrApprovalPolicy,
-    LegacyEnabledFlag, LegacyRequiredPullRequestReviews, LegacyRequiredStatusChecks,
-    LegacyRestrictions, MergeMethod, RefNameCondition, RequiredStatusCheck, Ruleset,
-    RulesetConditions, RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType,
-    RulesetTarget,
+    BranchProtection, BypassActor, BypassActorType, BypassMode, DefaultWorkflowPermissions,
+    ForkPrApprovalPolicy, LegacyEnabledFlag, LegacyRequiredPullRequestReviews,
+    LegacyRequiredStatusChecks, LegacyRestrictions, MergeMethod, RefNameCondition,
+    RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
+    RulesetRuleParameters, RulesetRuleType, RulesetTarget,
 };
 use crate::types::{BranchName, RepoRef, RuleId};
 use crate::workflow::model::{
@@ -53,6 +53,13 @@ fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Option<ForkPrAppr
     ]
 }
 
+fn default_workflow_permissions_strategy() -> impl Strategy<Value = DefaultWorkflowPermissions> {
+    prop_oneof![
+        Just(DefaultWorkflowPermissions::Read),
+        Just(DefaultWorkflowPermissions::Write),
+    ]
+}
+
 fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
     (
         any::<bool>(),
@@ -65,6 +72,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
         any::<bool>(),
         any::<bool>(),
         fork_pr_approval_policy_strategy(),
+        default_workflow_permissions_strategy(),
     )
         .prop_map(
             |(
@@ -78,6 +86,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
                 allow_merge_commit,
                 allow_rebase_merge,
                 fork_pr_approval_policy,
+                default_workflow_permissions,
             )| RepoSettings {
                 private,
                 archived,
@@ -89,6 +98,7 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
                 allow_merge_commit,
                 allow_rebase_merge,
                 fork_pr_approval_policy,
+                default_workflow_permissions,
             },
         )
 }
@@ -535,6 +545,7 @@ fn empty_repo_settings() -> RepoSettings {
         allow_merge_commit: false,
         allow_rebase_merge: false,
         fork_pr_approval_policy: None,
+        default_workflow_permissions: DefaultWorkflowPermissions::Read,
     }
 }
 
@@ -1080,6 +1091,44 @@ fn st009_fails_when_public_repo_configured_private() {
 fn st009_fails_when_private_repo_configured_public() {
     assert!(matches!(
         evaluate_st009(Visibility::Public, true),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn st010_passes_when_default_workflow_permissions_is_read() {
+    let mut facts = base_facts();
+    facts.settings.default_workflow_permissions = DefaultWorkflowPermissions::Read;
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::RepoSettingMatch {
+                setting: RepoSetting::DefaultWorkflowPermissions,
+                expected: SettingValue::DefaultWorkflowPermissions(
+                    DefaultWorkflowPermissions::Read,
+                ),
+            },
+            &facts,
+        ),
+        RuleResult::Pass,
+    );
+}
+
+#[test]
+fn st010_fails_when_default_workflow_permissions_is_write() {
+    let mut facts = base_facts();
+    facts.settings.default_workflow_permissions = DefaultWorkflowPermissions::Write;
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::RepoSettingMatch {
+                setting: RepoSetting::DefaultWorkflowPermissions,
+                expected: SettingValue::DefaultWorkflowPermissions(
+                    DefaultWorkflowPermissions::Read,
+                ),
+            },
+            &facts,
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1707,6 +1756,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("ST007".to_owned(), "pass"),
         ("ST008".to_owned(), "pass"),
         ("ST009".to_owned(), "pass"),
+        ("ST010".to_owned(), "pass"),
         ("WF001".to_owned(), "pass"),
         ("WF002".to_owned(), "pass"),
         ("WF003".to_owned(), "pass"),
@@ -1751,6 +1801,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("ST007".to_owned(), "fail"),
         ("ST008".to_owned(), "pass"),
         ("ST009".to_owned(), "fail"),
+        ("ST010".to_owned(), "fail"),
         ("WF001".to_owned(), "fail"),
         ("WF002".to_owned(), "fail"),
         ("WF003".to_owned(), "fail"),

@@ -535,6 +535,17 @@ pub struct ForkPrApprovalPermission {
     pub approval_policy: ForkPrApprovalPolicy,
 }
 
+string_enum!(DefaultWorkflowPermissions {
+    Read => "read",
+    Write => "write",
+});
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPermissions {
+    pub default_workflow_permissions: DefaultWorkflowPermissions,
+    pub can_approve_pull_request_reviews: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

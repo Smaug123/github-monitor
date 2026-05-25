@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath, RepoPathError};
 use crate::github::types::{
-    BranchProtection, ContentEncoding, ForkPrApprovalPolicy, GitTreeEntryType, Repository, Ruleset,
+    BranchProtection, ContentEncoding, DefaultWorkflowPermissions, ForkPrApprovalPolicy,
+    GitTreeEntryType, Repository, Ruleset,
 };
 use crate::types::{BranchName, RepoRef};
 use crate::workflow::model::Workflow;
@@ -25,12 +26,14 @@ pub struct RepoSettings {
     pub allow_rebase_merge: bool,
     #[serde(default)]
     pub fork_pr_approval_policy: Option<ForkPrApprovalPolicy>,
+    pub default_workflow_permissions: DefaultWorkflowPermissions,
 }
 
 impl RepoSettings {
     pub fn new(
         repository: &Repository,
         fork_pr_approval_policy: Option<ForkPrApprovalPolicy>,
+        default_workflow_permissions: DefaultWorkflowPermissions,
     ) -> Self {
         Self {
             private: repository.private,
@@ -43,6 +46,7 @@ impl RepoSettings {
             allow_merge_commit: repository.allow_merge_commit,
             allow_rebase_merge: repository.allow_rebase_merge,
             fork_pr_approval_policy,
+            default_workflow_permissions,
         }
     }
 }
@@ -82,7 +86,14 @@ pub fn gather_repo_facts(
     let fork_pr_approval_policy = client
         .get_fork_pr_approval_permission(&repo)?
         .map(|permission| permission.approval_policy);
-    let settings = RepoSettings::new(&repository, fork_pr_approval_policy);
+    let default_workflow_permissions = client
+        .get_workflow_permissions(&repo)?
+        .default_workflow_permissions;
+    let settings = RepoSettings::new(
+        &repository,
+        fork_pr_approval_policy,
+        default_workflow_permissions,
+    );
     let rulesets = fetch_rulesets(client, &repo)?;
     let legacy_branch_protection = client.get_branch_protection(&repo, &default_branch)?;
     let tree = client.get_git_tree(&repo, &default_branch.to_string())?;
@@ -423,6 +434,14 @@ mod tests {
         ]
     }
 
+    fn default_workflow_permissions_strategy() -> impl Strategy<Value = DefaultWorkflowPermissions> {
+        prop_oneof![
+            Just(DefaultWorkflowPermissions::Read),
+            Just(DefaultWorkflowPermissions::Write),
+            "[a-z][a-z0-9_]{0,16}".prop_map(DefaultWorkflowPermissions::Unknown),
+        ]
+    }
+
     fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
         (
             any::<bool>(),
@@ -435,6 +454,7 @@ mod tests {
             any::<bool>(),
             any::<bool>(),
             fork_pr_approval_policy_strategy(),
+            default_workflow_permissions_strategy(),
         )
             .prop_map(
                 |(
@@ -448,6 +468,7 @@ mod tests {
                     allow_merge_commit,
                     allow_rebase_merge,
                     fork_pr_approval_policy,
+                    default_workflow_permissions,
                 )| RepoSettings {
                     private,
                     archived,
@@ -459,6 +480,7 @@ mod tests {
                     allow_merge_commit,
                     allow_rebase_merge,
                     fork_pr_approval_policy,
+                    default_workflow_permissions,
                 },
             )
     }
@@ -833,6 +855,7 @@ mod tests {
                 allow_merge_commit: false,
                 allow_rebase_merge: false,
                 fork_pr_approval_policy: Some(ForkPrApprovalPolicy::AllExternalContributors),
+                default_workflow_permissions: DefaultWorkflowPermissions::Read,
             },
             legacy_branch_protection: None,
             rulesets: vec![Ruleset {

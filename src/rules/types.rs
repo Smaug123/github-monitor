@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
-use crate::github::types::{ForkPrApprovalPolicy, MergeMethod};
+use crate::github::types::{DefaultWorkflowPermissions, ForkPrApprovalPolicy, MergeMethod};
 use crate::types::RuleId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +16,7 @@ pub enum RepoSetting {
     AllowMergeCommit,
     AllowRebaseMerge,
     ForkPrApprovalPolicy,
+    DefaultWorkflowPermissions,
 }
 
 impl RepoSetting {
@@ -31,6 +32,7 @@ impl RepoSetting {
             Self::AllowMergeCommit => "allow_merge_commit",
             Self::AllowRebaseMerge => "allow_rebase_merge",
             Self::ForkPrApprovalPolicy => "fork_pr_approval_policy",
+            Self::DefaultWorkflowPermissions => "default_workflow_permissions",
         }
     }
 
@@ -60,6 +62,9 @@ impl RepoSetting {
             Self::ForkPrApprovalPolicy => {
                 SettingValue::ForkPrApprovalPolicy(settings.fork_pr_approval_policy.clone())
             }
+            Self::DefaultWorkflowPermissions => SettingValue::DefaultWorkflowPermissions(
+                settings.default_workflow_permissions.clone(),
+            ),
         }
     }
 }
@@ -68,6 +73,7 @@ impl RepoSetting {
 pub enum SettingValue {
     Bool(bool),
     ForkPrApprovalPolicy(Option<ForkPrApprovalPolicy>),
+    DefaultWorkflowPermissions(DefaultWorkflowPermissions),
 }
 
 impl SettingValue {
@@ -76,13 +82,14 @@ impl SettingValue {
             Self::Bool(value) => value.to_string(),
             Self::ForkPrApprovalPolicy(Some(policy)) => String::from(policy.clone()),
             Self::ForkPrApprovalPolicy(None) => "unknown".to_owned(),
+            Self::DefaultWorkflowPermissions(value) => String::from(value.clone()),
         }
     }
 
     pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
-            Self::ForkPrApprovalPolicy(_) => None,
+            Self::ForkPrApprovalPolicy(_) | Self::DefaultWorkflowPermissions(_) => None,
         }
     }
 }
