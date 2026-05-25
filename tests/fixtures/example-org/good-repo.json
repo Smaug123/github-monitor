@@ -117,6 +117,8 @@
   "files_present": [
     ".envrc",
     ".github/workflows/ci.yml",
+    "AGENTS.md",
+    "CLAUDE.md",
     "CODEOWNERS",
     "flake.lock",
     "flake.nix"

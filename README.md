@@ -260,6 +260,9 @@ The default rule set is currently fixed in code.
 | `WF006` | PR-triggered workflows do not reference `${{ secrets.* }}` |
 | `NX001` | `flake.nix` exists |
 | `NX002` | The flake has observable check coverage |
+| `FL001` | `.envrc` exists |
+| `FL002` | `AGENTS.md` exists |
+| `FL003` | `CLAUDE.md` exists |
 | `ST001` | `allow_auto_merge = true` |
 | `ST002` | `delete_branch_on_merge = true` |
 | `ST003` | `allow_update_branch = true` |
