@@ -14,7 +14,17 @@ pub struct Config {
 pub struct RepoConfig {
     pub owner: String,
     pub name: String,
+    #[serde(default)]
+    pub visibility: Visibility,
     pub disabled_rules: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    #[default]
+    Public,
+    Private,
 }
 
 impl Config {
@@ -85,15 +95,21 @@ mod tests {
         "[a-zA-Z][a-zA-Z0-9_-]{0,30}"
     }
 
+    fn visibility_strategy() -> impl Strategy<Value = Visibility> {
+        prop_oneof![Just(Visibility::Public), Just(Visibility::Private)]
+    }
+
     fn repo_config_strategy() -> impl Strategy<Value = RepoConfig> {
         (
             identifier(),
             identifier(),
+            visibility_strategy(),
             proptest::option::of(proptest::collection::vec(identifier(), 0..5)),
         )
-            .prop_map(|(owner, name, disabled_rules)| RepoConfig {
+            .prop_map(|(owner, name, visibility, disabled_rules)| RepoConfig {
                 owner,
                 name,
+                visibility,
                 disabled_rules,
             })
     }
@@ -116,9 +132,69 @@ mod tests {
         let repo = RepoConfig {
             owner: "example-org".to_owned(),
             name: "example-repo".to_owned(),
+            visibility: Visibility::Public,
             disabled_rules: None,
         };
 
         assert_eq!(repo.repo_ref(), RepoRef::new("example-org", "example-repo"));
+    }
+
+    #[test]
+    fn repo_config_defaults_to_public_when_visibility_omitted() {
+        let toml = r#"
+[[repos]]
+owner = "example-org"
+name = "example-repo"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.repos[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn repo_config_parses_private_visibility() {
+        let toml = r#"
+[[repos]]
+owner = "example-org"
+name = "example-repo"
+visibility = "private"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.repos[0].visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn repo_config_parses_public_visibility_explicitly() {
+        let toml = r#"
+[[repos]]
+owner = "example-org"
+name = "example-repo"
+visibility = "public"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.repos[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn repo_config_rejects_unknown_visibility_string() {
+        let toml = r#"
+[[repos]]
+owner = "example-org"
+name = "example-repo"
+visibility = "internal"
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(result.is_err(), "expected parse error for unknown visibility");
+    }
+
+    #[test]
+    fn repo_config_rejects_titlecased_visibility() {
+        let toml = r#"
+[[repos]]
+owner = "example-org"
+name = "example-repo"
+visibility = "Private"
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(result.is_err(), "expected parse error for non-lowercase visibility");
     }
 }

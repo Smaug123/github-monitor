@@ -5,6 +5,7 @@ use proptest::prelude::*;
 use super::glob::{branch_matches_filters, branch_pattern_matches};
 use super::workflows::is_commit_sha;
 use super::*;
+use crate::config::{RepoConfig, Visibility};
 use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
     BranchProtection, BypassActor, BypassActorType, BypassMode, ForkPrApprovalPolicy,
@@ -656,6 +657,15 @@ fn bad_fixture() -> RepoFacts {
     .unwrap()
 }
 
+fn repo_config_with_visibility(visibility: Visibility) -> RepoConfig {
+    RepoConfig {
+        owner: "example-org".to_owned(),
+        name: "example-repo".to_owned(),
+        visibility,
+        disabled_rules: None,
+    }
+}
+
 fn result_tag(result: &RuleResult) -> &'static str {
     match result {
         RuleResult::Pass => "pass",
@@ -962,6 +972,18 @@ fn default_rule_ids_are_unique() {
 }
 
 #[test]
+fn rules_for_repo_ids_are_unique() {
+    let config = repo_config_with_visibility(Visibility::Private);
+    let ids = rules_for_repo(&config)
+        .into_iter()
+        .map(|rule| rule.id.to_string())
+        .collect::<Vec<_>>();
+    let unique = ids.iter().cloned().collect::<BTreeSet<_>>();
+
+    assert_eq!(unique.len(), ids.len());
+}
+
+#[test]
 fn workflow_has_job_passes_when_job_exists() {
     let mut facts = base_facts();
     facts.workflows = vec![workflow_with_single_job("build-and-test", Vec::new())];
@@ -1021,6 +1043,43 @@ fn repo_setting_match_reads_boolean_settings() {
             },
             &facts,
         ),
+        RuleResult::Fail { .. }
+    ));
+}
+
+fn evaluate_st009(visibility: Visibility, actual_private: bool) -> RuleResult {
+    let mut facts = base_facts();
+    facts.settings.private = actual_private;
+    let config = repo_config_with_visibility(visibility);
+    let rule = rules_for_repo(&config)
+        .into_iter()
+        .find(|rule| rule.id.to_string() == "ST009")
+        .expect("ST009 must be in rules_for_repo");
+    rule.evaluate(&facts).result
+}
+
+#[test]
+fn st009_passes_when_public_repo_configured_public() {
+    assert_eq!(evaluate_st009(Visibility::Public, false), RuleResult::Pass);
+}
+
+#[test]
+fn st009_passes_when_private_repo_configured_private() {
+    assert_eq!(evaluate_st009(Visibility::Private, true), RuleResult::Pass);
+}
+
+#[test]
+fn st009_fails_when_public_repo_configured_private() {
+    assert!(matches!(
+        evaluate_st009(Visibility::Private, false),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn st009_fails_when_private_repo_configured_public() {
+    assert!(matches!(
+        evaluate_st009(Visibility::Public, true),
         RuleResult::Fail { .. }
     ));
 }
@@ -1618,7 +1677,8 @@ fn wf006_fail_dominates_skip() {
 #[test]
 fn good_snapshot_matches_expected_default_rule_results() {
     let facts = good_fixture();
-    let outputs = evaluate_rules(&default_rules(), &facts);
+    let config = repo_config_with_visibility(Visibility::Public);
+    let outputs = evaluate_rules(&rules_for_repo(&config), &facts);
     let actual = outputs
         .into_iter()
         .map(|output| (output.id.to_string(), result_tag(&output.result)))
@@ -1646,6 +1706,7 @@ fn good_snapshot_matches_expected_default_rule_results() {
         ("ST006".to_owned(), "pass"),
         ("ST007".to_owned(), "pass"),
         ("ST008".to_owned(), "pass"),
+        ("ST009".to_owned(), "pass"),
         ("WF001".to_owned(), "pass"),
         ("WF002".to_owned(), "pass"),
         ("WF003".to_owned(), "pass"),
@@ -1660,7 +1721,8 @@ fn good_snapshot_matches_expected_default_rule_results() {
 #[test]
 fn bad_snapshot_matches_expected_default_rule_results() {
     let facts = bad_fixture();
-    let outputs = evaluate_rules(&default_rules(), &facts);
+    let config = repo_config_with_visibility(Visibility::Private);
+    let outputs = evaluate_rules(&rules_for_repo(&config), &facts);
     let actual = outputs
         .into_iter()
         .map(|output| (output.id.to_string(), result_tag(&output.result)))
@@ -1688,6 +1750,7 @@ fn bad_snapshot_matches_expected_default_rule_results() {
         ("ST006".to_owned(), "fail"),
         ("ST007".to_owned(), "fail"),
         ("ST008".to_owned(), "pass"),
+        ("ST009".to_owned(), "fail"),
         ("WF001".to_owned(), "fail"),
         ("WF002".to_owned(), "fail"),
         ("WF003".to_owned(), "fail"),

@@ -1,3 +1,4 @@
+use crate::config::{RepoConfig, Visibility};
 use crate::github::types::{ForkPrApprovalPolicy, MergeMethod};
 
 use super::{RepoSetting, Rule, RuleKind, SettingValue};
@@ -168,4 +169,18 @@ pub fn default_rules() -> Vec<Rule> {
             },
         ),
     ]
+}
+
+pub fn rules_for_repo(repo: &RepoConfig) -> Vec<Rule> {
+    let mut rules = default_rules();
+    let expect_private = matches!(repo.visibility, Visibility::Private);
+    rules.push(Rule::new(
+        "ST009",
+        "Repository visibility matches configured expectation",
+        RuleKind::RepoSettingMatch {
+            setting: RepoSetting::Private,
+            expected: SettingValue::Bool(expect_private),
+        },
+    ));
+    rules
 }

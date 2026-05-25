@@ -2053,8 +2053,9 @@ fn summarize_examples(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{RepoConfig, Visibility};
     use crate::facts::{RepoSettings, WorkflowFile};
-    use crate::rules::{RepoSetting, Rule, SettingValue, default_rules};
+    use crate::rules::{RepoSetting, Rule, SettingValue, rules_for_repo};
     use crate::workflow::model::{
         ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step, StepKind, Triggers,
         Workflow, WorkflowDispatch,
@@ -2195,13 +2196,19 @@ mod tests {
     #[test]
     fn bad_fixture_plans_effects_and_rejections_for_failed_rules() {
         let facts = bad_fixture();
-        let fixes = plan_repo_fixes(&default_rules(), &facts);
+        let config = RepoConfig {
+            owner: "example-org".to_owned(),
+            name: "bad-repo".to_owned(),
+            visibility: Visibility::Private,
+            disabled_rules: None,
+        };
+        let fixes = plan_repo_fixes(&rules_for_repo(&config), &facts);
         let by_rule_id = fixes
             .iter()
             .map(|fix| (fix.rule_id.to_string(), fix))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(fixes.len(), 26);
+        assert_eq!(fixes.len(), 27);
         assert_eq!(
             by_rule_id["ST001"].plan,
             FixPlan::Effect(FixEffect::SetRepositorySetting {
