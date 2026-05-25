@@ -398,8 +398,8 @@ mod tests {
         RulesetRuleParameters, RulesetRuleType, RulesetTarget,
     };
     use crate::workflow::model::{
-        ActionRef, ActionReference, ActionStep, Job, RunStep, Step, StepKind, TriggerFilter,
-        Triggers, WithValue, Workflow,
+        ActionRef, ActionReference, ActionStep, Job, JobKind, RunStep, StandardJob, Step, StepKind,
+        TriggerFilter, Triggers, WithValue, Workflow,
     };
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -705,10 +705,12 @@ mod tests {
                     proptest::option::of(text()),
                 )
                     .prop_map(|(steps, needs, condition)| Job {
-                        runs_on: None,
-                        steps,
                         needs,
                         condition,
+                        kind: JobKind::Standard(StandardJob {
+                            runs_on: None,
+                            steps,
+                        }),
                     }),
                 0..3,
             ),
@@ -789,30 +791,32 @@ mod tests {
         jobs.insert(
             "build".to_owned(),
             Job {
-                runs_on: None,
-                steps: vec![
-                    Step {
-                        name: Some("Checkout".to_owned()),
-                        id: None,
-                        condition: None,
-                        kind: StepKind::Action(ActionStep {
-                            uses: ActionReference::Repository(ActionRef::new(
-                                "actions", "checkout", "f00ba4",
-                            )),
-                            with: BTreeMap::new(),
-                        }),
-                    },
-                    Step {
-                        name: Some("Test".to_owned()),
-                        id: None,
-                        condition: None,
-                        kind: StepKind::Run(RunStep {
-                            run: "cargo test".to_owned(),
-                        }),
-                    },
-                ],
                 needs: Vec::new(),
                 condition: None,
+                kind: JobKind::Standard(StandardJob {
+                    runs_on: None,
+                    steps: vec![
+                        Step {
+                            name: Some("Checkout".to_owned()),
+                            id: None,
+                            condition: None,
+                            kind: StepKind::Action(ActionStep {
+                                uses: ActionReference::Repository(ActionRef::new(
+                                    "actions", "checkout", "f00ba4",
+                                )),
+                                with: BTreeMap::new(),
+                            }),
+                        },
+                        Step {
+                            name: Some("Test".to_owned()),
+                            id: None,
+                            condition: None,
+                            kind: StepKind::Run(RunStep {
+                                run: "cargo test".to_owned(),
+                            }),
+                        },
+                    ],
+                }),
             },
         );
 

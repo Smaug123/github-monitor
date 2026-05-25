@@ -61,10 +61,26 @@
         }
       },
       "raw_yaml": "name: Post-CI\non:\n  workflow_run: {}\njobs:\n  audit:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo audit\n"
+    },
+    {
+      "path": ".github/workflows/reusable-caller.yml",
+      "workflow": {
+        "name": "Reusable Caller",
+        "on": {
+          "pull_request": {}
+        },
+        "jobs": {
+          "call-release": {
+            "uses": "example-org/shared/.github/workflows/release.yml@main"
+          }
+        }
+      },
+      "raw_yaml": "name: Reusable Caller\non:\n  pull_request: {}\njobs:\n  call-release:\n    uses: example-org/shared/.github/workflows/release.yml@main\n"
     }
   ],
   "files_present": [
     ".github/workflows/post-ci.yml",
+    ".github/workflows/reusable-caller.yml",
     ".github/workflows/unsafe.yml",
     "README.md"
   ]

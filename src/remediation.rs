@@ -1743,11 +1743,11 @@ fn plan_workflow_pin_pull_request(facts: &RepoFacts) -> FixPlan {
         let mut pins = Vec::new();
 
         for job in workflow_file.workflow.jobs.values() {
-            for step in &job.steps {
-                let Some(uses) = step.uses() else {
-                    continue;
-                };
-
+            for uses in job
+                .uses()
+                .into_iter()
+                .chain(job.steps().iter().filter_map(|step| step.uses()))
+            {
                 if workflow_action_reference_is_pinned(uses) {
                     continue;
                 }
@@ -2056,7 +2056,8 @@ mod tests {
     use crate::facts::{RepoSettings, WorkflowFile};
     use crate::rules::{RepoSetting, Rule, SettingValue, default_rules};
     use crate::workflow::model::{
-        ActionStep, Job, RunStep, Step, StepKind, Triggers, Workflow, WorkflowDispatch,
+        ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step, StepKind, Triggers,
+        Workflow, WorkflowDispatch,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Read, Write};
@@ -2099,6 +2100,48 @@ mod tests {
         workflow_with_action_and_yaml(path, uses, block_line)
     }
 
+    fn single_pin_bad_repo_facts() -> RepoFacts {
+        let mut facts = base_facts();
+        facts.repo = RepoRef::new("example-org", "bad-repo");
+        facts.workflows.push(workflow_with_action(
+            ".github/workflows/unsafe.yml",
+            ActionReference::Repository(ActionRef::new("actions", "checkout", "v4")),
+        ));
+        facts
+    }
+
+    fn workflow_with_reusable_job(path: &str, uses: ActionReference) -> WorkflowFile {
+        let raw_yaml = format!(
+            "name: Reusable\non:\n  workflow_dispatch: {{}}\njobs:\n  call:\n    uses: {}\n",
+            action_reference_text(&uses),
+        );
+        WorkflowFile {
+            path: path.to_owned(),
+            raw_yaml: Some(raw_yaml),
+            workflow: Workflow {
+                name: Some("Reusable".to_owned()),
+                triggers: Triggers {
+                    push: None,
+                    pull_request: None,
+                    pull_request_target: None,
+                    workflow_run: None,
+                    workflow_dispatch: Some(WorkflowDispatch::default()),
+                },
+                jobs: BTreeMap::from([(
+                    "call".to_owned(),
+                    Job {
+                        needs: Vec::new(),
+                        condition: None,
+                        kind: JobKind::Reusable(ReusableJob {
+                            uses,
+                            with: BTreeMap::new(),
+                        }),
+                    },
+                )]),
+            },
+        }
+    }
+
     fn workflow_with_action_and_yaml(
         path: &str,
         uses: ActionReference,
@@ -2119,28 +2162,30 @@ mod tests {
                 jobs: BTreeMap::from([(
                     "build".to_owned(),
                     Job {
-                        runs_on: None,
-                        steps: vec![
-                            Step {
-                                name: None,
-                                id: None,
-                                condition: None,
-                                kind: StepKind::Action(ActionStep {
-                                    uses,
-                                    with: BTreeMap::new(),
-                                }),
-                            },
-                            Step {
-                                name: None,
-                                id: None,
-                                condition: None,
-                                kind: StepKind::Run(RunStep {
-                                    run: "echo ok".to_owned(),
-                                }),
-                            },
-                        ],
                         needs: Vec::new(),
                         condition: None,
+                        kind: JobKind::Standard(StandardJob {
+                            runs_on: None,
+                            steps: vec![
+                                Step {
+                                    name: None,
+                                    id: None,
+                                    condition: None,
+                                    kind: StepKind::Action(ActionStep {
+                                        uses,
+                                        with: BTreeMap::new(),
+                                    }),
+                                },
+                                Step {
+                                    name: None,
+                                    id: None,
+                                    condition: None,
+                                    kind: StepKind::Run(RunStep {
+                                        run: "echo ok".to_owned(),
+                                    }),
+                                },
+                            ],
+                        }),
                     },
                 )]),
             },
@@ -2182,7 +2227,7 @@ mod tests {
         ));
         assert_eq!(
             by_rule_id["WF002"].planned_report().description,
-            "open a pull request that pins 1 workflow action reference across 1 workflow file to commit SHAs"
+            "open a pull request that pins 2 workflow action references across 2 workflow files to commit SHAs"
         );
         assert_eq!(
             by_rule_id["ST004"].plan,
@@ -2287,6 +2332,38 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn workflow_pin_fix_plans_pin_for_job_level_reusable_workflow() {
+        let mut facts = base_facts();
+        facts.workflows.push(workflow_with_reusable_job(
+            ".github/workflows/release-caller.yml",
+            ActionReference::Other(
+                "example-org/shared/.github/workflows/release.yml@main".to_owned(),
+            ),
+        ));
+
+        let FixPlan::Effect(FixEffect::OpenWorkflowPinPullRequest { plan }) =
+            plan_workflow_pin_pull_request(&facts)
+        else {
+            panic!("expected an OpenWorkflowPinPullRequest effect for the unpinned reusable job");
+        };
+
+        assert_eq!(plan.workflows.len(), 1);
+        let workflow_pins = &plan.workflows[0];
+        assert_eq!(workflow_pins.path, ".github/workflows/release-caller.yml");
+        assert_eq!(workflow_pins.pins.len(), 1);
+
+        let pin = &workflow_pins.pins[0];
+        assert_eq!(pin.action.repo.owner.to_string(), "example-org");
+        assert_eq!(pin.action.repo.name.to_string(), "shared");
+        assert_eq!(
+            pin.action.subpath.as_deref(),
+            Some(".github/workflows/release.yml")
+        );
+        assert_eq!(pin.action.version, "main");
+        assert_eq!(pin.occurrences, 1);
     }
 
     #[test]
@@ -2648,7 +2725,7 @@ mod tests {
 
     #[test]
     fn execute_repo_fixes_opens_pull_request_for_workflow_pins() {
-        let facts = bad_fixture();
+        let facts = single_pin_bad_repo_facts();
         let rules = vec![Rule::new(
             "WF002",
             "Workflow actions are pinned to commit SHAs",
@@ -2762,7 +2839,7 @@ mod tests {
 
     #[test]
     fn execute_repo_fixes_pins_quoted_uses_with_comment_outside_quotes() {
-        let facts = bad_fixture();
+        let facts = single_pin_bad_repo_facts();
         let rules = vec![Rule::new(
             "WF002",
             "Workflow actions are pinned to commit SHAs",
@@ -2859,7 +2936,7 @@ mod tests {
 
     #[test]
     fn execute_repo_fixes_deletes_temporary_branch_after_pull_request_failure() {
-        let facts = bad_fixture();
+        let facts = single_pin_bad_repo_facts();
         let rules = vec![Rule::new(
             "WF002",
             "Workflow actions are pinned to commit SHAs",

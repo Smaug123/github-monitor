@@ -15,8 +15,8 @@ use crate::github::types::{
 };
 use crate::types::{BranchName, RepoRef, RuleId};
 use crate::workflow::model::{
-    ActionRef, ActionReference, ActionStep, Job, RunStep, Step, StepKind, TriggerFilter, Triggers,
-    Workflow, WorkflowDispatch, WorkflowRun,
+    ActionRef, ActionReference, ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step,
+    StepKind, TriggerFilter, Triggers, Workflow, WorkflowDispatch, WorkflowRun,
 };
 
 fn reason() -> impl Strategy<Value = String> {
@@ -341,10 +341,12 @@ fn workflow_strategy() -> impl Strategy<Value = Workflow> {
                         (
                             name,
                             Job {
-                                runs_on: None,
-                                steps,
                                 needs: Vec::new(),
                                 condition: None,
+                                kind: JobKind::Standard(StandardJob {
+                                    runs_on: None,
+                                    steps,
+                                }),
                             },
                         )
                     })
@@ -565,6 +567,26 @@ fn active_branch_ruleset(rules: Vec<RulesetRule>) -> Ruleset {
 }
 
 fn workflow_with_single_job(job_name: &str, steps: Vec<Step>) -> WorkflowFile {
+    workflow_with_single_job_kind(
+        job_name,
+        JobKind::Standard(StandardJob {
+            runs_on: None,
+            steps,
+        }),
+    )
+}
+
+fn workflow_with_reusable_job(job_name: &str, uses: ActionReference) -> WorkflowFile {
+    workflow_with_single_job_kind(
+        job_name,
+        JobKind::Reusable(ReusableJob {
+            uses,
+            with: BTreeMap::new(),
+        }),
+    )
+}
+
+fn workflow_with_single_job_kind(job_name: &str, kind: JobKind) -> WorkflowFile {
     WorkflowFile {
         path: ".github/workflows/ci.yml".to_owned(),
         raw_yaml: None,
@@ -586,10 +608,9 @@ fn workflow_with_single_job(job_name: &str, steps: Vec<Step>) -> WorkflowFile {
             jobs: BTreeMap::from([(
                 job_name.to_owned(),
                 Job {
-                    runs_on: None,
-                    steps,
                     needs: Vec::new(),
                     condition: None,
+                    kind,
                 },
             )]),
         },
@@ -1245,6 +1266,74 @@ fn workflow_actions_pinned_to_sha_fails_for_subdir_action_with_at_in_ref() {
 }
 
 #[test]
+fn wf002_passes_for_pinned_reusable_workflow() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_with_reusable_job(
+        "call-shared",
+        ActionReference::Other(
+            "owner/repo/.github/workflows/x.yml@0123456789abcdef0123456789abcdef01234567"
+                .to_owned(),
+        ),
+    )];
+
+    assert_eq!(
+        evaluate(&RuleKind::WorkflowActionsPinnedToSha, &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn wf002_fails_for_unpinned_reusable_workflow() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_with_reusable_job(
+        "call-shared",
+        ActionReference::Other("owner/repo/.github/workflows/x.yml@main".to_owned()),
+    )];
+
+    let result = evaluate(&RuleKind::WorkflowActionsPinnedToSha, &facts);
+    let RuleResult::Fail { reason } = result else {
+        panic!("expected Fail, got {result:?}");
+    };
+    assert!(
+        reason.contains("owner/repo/.github/workflows/x.yml@main"),
+        "reason `{reason}` should mention the offending reusable workflow ref",
+    );
+    assert!(
+        reason.contains(".github/workflows/ci.yml"),
+        "reason `{reason}` should mention the workflow file path",
+    );
+}
+
+#[test]
+fn wf002_fails_when_reusable_pin_is_unpinned_alongside_pinned_steps() {
+    let pinned_step = action_step(ActionReference::Repository(ActionRef::new(
+        "actions",
+        "checkout",
+        "0123456789abcdef0123456789abcdef01234567",
+    )));
+
+    let mut facts = base_facts();
+    facts.workflows = vec![
+        workflow_with_single_job_kind(
+            "mixed",
+            JobKind::Standard(StandardJob {
+                runs_on: None,
+                steps: vec![pinned_step],
+            }),
+        ),
+        workflow_with_reusable_job(
+            "call-shared",
+            ActionReference::Other("owner/repo/.github/workflows/x.yml@v1".to_owned()),
+        ),
+    ];
+
+    assert!(matches!(
+        evaluate(&RuleKind::WorkflowActionsPinnedToSha, &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
 fn no_workflow_run_trigger_passes_when_absent() {
     let mut facts = base_facts();
     facts.workflows = vec![workflow_with_single_job("build", vec![run_step("cargo test")])];
@@ -1591,10 +1680,12 @@ fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> Workfl
             jobs: BTreeMap::from([(
                 "all-required-checks-complete".to_owned(),
                 Job {
-                    runs_on: None,
-                    steps,
                     needs: Vec::new(),
                     condition: condition.map(str::to_owned),
+                    kind: JobKind::Standard(StandardJob {
+                        runs_on: None,
+                        steps,
+                    }),
                 },
             )]),
         },
@@ -1742,10 +1833,12 @@ fn workflow_has_required_checks_complete_passes_when_one_of_many_jobs_matches() 
                 jobs: BTreeMap::from([(
                     "all-required-checks-complete".to_owned(),
                     Job {
-                        runs_on: None,
-                        steps: vec![check_required_lite_step()],
                         needs: Vec::new(),
                         condition: Some("${{ always() }}".to_owned()),
+                        kind: JobKind::Standard(StandardJob {
+                            runs_on: None,
+                            steps: vec![check_required_lite_step()],
+                        }),
                     },
                 )]),
             },

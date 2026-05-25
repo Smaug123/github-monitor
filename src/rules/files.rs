@@ -45,7 +45,7 @@ fn workflows_run_nix_flake_check(facts: &RepoFacts) -> bool {
             .workflow
             .jobs
             .values()
-            .flat_map(|job| job.steps.iter())
+            .flat_map(|job| job.steps().iter())
             .filter_map(|step| step.run())
             .any(|run| run.contains("nix flake check"))
     })
