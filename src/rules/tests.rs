@@ -428,10 +428,19 @@ fn setting_value_strategy() -> impl Strategy<Value = SettingValue> {
     any::<bool>().prop_map(SettingValue::Bool)
 }
 
+fn required_check_source_strategy() -> impl Strategy<Value = RequiredCheckSource> {
+    prop_oneof![
+        Just(RequiredCheckSource::Any),
+        Just(RequiredCheckSource::GitHubActions),
+    ]
+}
+
 fn rule_kind_strategy() -> impl Strategy<Value = RuleKind> {
     prop_oneof![
         Just(RuleKind::RulesetExists),
-        identifier().prop_map(|check_name| RuleKind::RulesetRequiresStatusCheck { check_name }),
+        (identifier(), required_check_source_strategy()).prop_map(|(check_name, source)| {
+            RuleKind::RulesetRequiresStatusCheck { check_name, source }
+        }),
         Just(RuleKind::RulesetEnforcesAdmins),
         Just(RuleKind::RulesetRequiresLinearHistory),
         Just(RuleKind::RulesetPreventsForcePush),
@@ -1444,7 +1453,10 @@ fn wf002_fails_when_reusable_pin_is_unpinned_alongside_pinned_steps() {
 #[test]
 fn no_workflow_run_trigger_passes_when_absent() {
     let mut facts = base_facts();
-    facts.workflows = vec![workflow_with_single_job("build", vec![run_step("cargo test")])];
+    facts.workflows = vec![workflow_with_single_job(
+        "build",
+        vec![run_step("cargo test")],
+    )];
 
     assert_eq!(
         evaluate(&RuleKind::NoWorkflowRunTrigger, &facts),
@@ -1559,8 +1571,7 @@ fn wf006_fails_for_pull_request_step_env_secret() {
          env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
     )];
 
-    let RuleResult::Fail { reason } =
-        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    let RuleResult::Fail { reason } = evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
     else {
         panic!("expected Fail");
     };
@@ -1594,8 +1605,7 @@ fn wf006_fails_for_secret_in_step_with_argument() {
          with:\n          token: ${{ secrets.MY_TOKEN }}\n",
     )];
 
-    let RuleResult::Fail { reason } =
-        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    let RuleResult::Fail { reason } = evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
     else {
         panic!("expected Fail");
     };
@@ -1626,8 +1636,7 @@ fn wf006_fails_for_workflow_level_env_secret() {
          jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr list\n",
     )];
 
-    let RuleResult::Fail { reason } =
-        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    let RuleResult::Fail { reason } = evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
     else {
         panic!("expected Fail");
     };
@@ -1683,8 +1692,7 @@ fn wf006_skips_when_raw_yaml_unavailable_on_pr_workflow() {
         },
     }];
 
-    let RuleResult::Skip { reason } =
-        evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
+    let RuleResult::Skip { reason } = evaluate(&RuleKind::NoPullRequestSecretReferences, &facts)
     else {
         panic!("expected Skip");
     };
@@ -1876,11 +1884,60 @@ fn ruleset_requires_status_check_passes_when_check_exists() {
         evaluate(
             &RuleKind::RulesetRequiresStatusCheck {
                 check_name: "ci".to_owned(),
+                source: RequiredCheckSource::Any,
             },
             &facts,
         ),
         RuleResult::Pass
     );
+}
+
+#[test]
+fn ruleset_requires_status_check_respects_github_actions_source() {
+    let check_with = |integration_id| {
+        let mut facts = base_facts();
+        facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
+            kind: RulesetRuleType::RequiredStatusChecks,
+            parameters: Some(RulesetRuleParameters {
+                required_status_checks: vec![RequiredStatusCheck {
+                    context: "all-required-checks-complete".to_owned(),
+                    integration_id,
+                }],
+                ..Default::default()
+            }),
+        }])];
+        facts
+    };
+    let github_actions = |integration_id| {
+        evaluate(
+            &RuleKind::RulesetRequiresStatusCheck {
+                check_name: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::GitHubActions,
+            },
+            &check_with(integration_id),
+        )
+    };
+
+    // Present but with no pinned app (the GitHub default, "any source") does not
+    // satisfy a GitHub-Actions-sourced requirement.
+    assert!(matches!(github_actions(None), RuleResult::Fail { .. }));
+    // Present but reported by a different app likewise fails.
+    assert!(matches!(github_actions(Some(7)), RuleResult::Fail { .. }));
+    // Pinned to the GitHub Actions app passes.
+    assert_eq!(github_actions(Some(15368)), RuleResult::Pass);
+
+    // The `Any` source accepts the check regardless of which app reports it.
+    let any = |integration_id| {
+        evaluate(
+            &RuleKind::RulesetRequiresStatusCheck {
+                check_name: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::Any,
+            },
+            &check_with(integration_id),
+        )
+    };
+    assert_eq!(any(None), RuleResult::Pass);
+    assert_eq!(any(Some(7)), RuleResult::Pass);
 }
 
 #[test]
@@ -1913,6 +1970,7 @@ fn ruleset_scoped_to_other_branch_does_not_satisfy_default_branch_rules() {
         evaluate(
             &RuleKind::RulesetRequiresStatusCheck {
                 check_name: "ci".to_owned(),
+                source: RequiredCheckSource::Any,
             },
             &facts,
         ),

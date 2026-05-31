@@ -1,7 +1,7 @@
 use crate::config::{RepoConfig, Visibility};
 use crate::github::types::{DefaultWorkflowPermissions, ForkPrApprovalPolicy, MergeMethod};
 
-use super::{RepoSetting, Rule, RuleKind, SettingValue};
+use super::{RepoSetting, RequiredCheckSource, Rule, RuleKind, SettingValue};
 
 pub fn default_rules() -> Vec<Rule> {
     vec![
@@ -50,9 +50,10 @@ pub fn default_rules() -> Vec<Rule> {
         ),
         Rule::new(
             "RS012",
-            "all-required-checks-complete status check is required",
+            "all-required-checks-complete status check is required from GitHub Actions",
             RuleKind::RulesetRequiresStatusCheck {
                 check_name: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::GitHubActions,
             },
         ),
         Rule::new(

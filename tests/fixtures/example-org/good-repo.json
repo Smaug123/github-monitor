@@ -37,7 +37,8 @@
                 "context": "ci"
               },
               {
-                "context": "all-required-checks-complete"
+                "context": "all-required-checks-complete",
+                "integration_id": 15368
               }
             ],
             "strict_required_status_checks_policy": true

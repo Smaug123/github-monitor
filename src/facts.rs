@@ -434,7 +434,8 @@ mod tests {
         ]
     }
 
-    fn default_workflow_permissions_strategy() -> impl Strategy<Value = DefaultWorkflowPermissions> {
+    fn default_workflow_permissions_strategy() -> impl Strategy<Value = DefaultWorkflowPermissions>
+    {
         prop_oneof![
             Just(DefaultWorkflowPermissions::Read),
             Just(DefaultWorkflowPermissions::Write),

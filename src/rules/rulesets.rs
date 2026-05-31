@@ -7,7 +7,7 @@ use crate::github::types::{
 };
 
 use super::glob::branch_pattern_matches;
-use super::{RuleKind, RuleResult};
+use super::{RequiredCheckSource, RuleKind, RuleResult};
 
 pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     match kind {
@@ -20,7 +20,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::RulesetRequiresStatusCheck { check_name } => {
+        RuleKind::RulesetRequiresStatusCheck { check_name, source } => {
             if !has_active_branch_ruleset_for_default_branch(facts) {
                 return RuleResult::Fail {
                     reason: "no active branch ruleset was found".to_owned(),
@@ -31,19 +31,16 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 ruleset.rules.iter().any(|rule| {
                     rule.kind == RulesetRuleType::RequiredStatusChecks
                         && rule.parameters.as_ref().is_some_and(|parameters| {
-                            parameters
-                                .required_status_checks
-                                .iter()
-                                .any(|check| check.context == *check_name)
+                            parameters.required_status_checks.iter().any(|check| {
+                                check.context == *check_name && source.accepts(check.integration_id)
+                            })
                         })
                 })
             }) {
                 RuleResult::Pass
             } else {
                 RuleResult::Fail {
-                    reason: format!(
-                        "no active branch ruleset requires status check `{check_name}`"
-                    ),
+                    reason: required_status_check_failure_reason(check_name, source),
                 }
             }
         }
@@ -99,6 +96,17 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
             }
         }
         _ => unreachable!("non-ruleset rule passed to rulesets::evaluate"),
+    }
+}
+
+fn required_status_check_failure_reason(check_name: &str, source: &RequiredCheckSource) -> String {
+    match source {
+        RequiredCheckSource::Any => {
+            format!("no active branch ruleset requires status check `{check_name}`")
+        }
+        RequiredCheckSource::GitHubActions => format!(
+            "no active branch ruleset requires status check `{check_name}` reported by GitHub Actions"
+        ),
     }
 }
 

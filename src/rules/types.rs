@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
-use crate::github::types::{DefaultWorkflowPermissions, ForkPrApprovalPolicy, MergeMethod};
+use crate::github::types::{
+    DefaultWorkflowPermissions, ForkPrApprovalPolicy, GITHUB_ACTIONS_INTEGRATION_ID, MergeMethod,
+};
 use crate::types::RuleId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,11 +96,43 @@ impl SettingValue {
     }
 }
 
+/// Which app must report a required status check for it to count. GitHub records
+/// the reporting app on each required check as an `integration_id`; `Any` imposes
+/// no constraint (GitHub's default), while `GitHubActions` requires the check to
+/// come from the first-party GitHub Actions app, so a third-party integration
+/// can't satisfy the rule by reporting a same-named context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RequiredCheckSource {
+    Any,
+    GitHubActions,
+}
+
+impl RequiredCheckSource {
+    /// The `integration_id` GitHub records for a check from this source, or
+    /// `None` when the source pins no particular app.
+    pub(crate) fn integration_id(&self) -> Option<u64> {
+        match self {
+            Self::Any => None,
+            Self::GitHubActions => Some(GITHUB_ACTIONS_INTEGRATION_ID),
+        }
+    }
+
+    /// Whether a check whose reporting app is `integration_id` satisfies this
+    /// source constraint.
+    pub(crate) fn accepts(&self, integration_id: Option<u64>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::GitHubActions => integration_id == Some(GITHUB_ACTIONS_INTEGRATION_ID),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RuleKind {
     RulesetExists,
     RulesetRequiresStatusCheck {
         check_name: String,
+        source: RequiredCheckSource,
     },
     RulesetEnforcesAdmins,
     RulesetRequiresLinearHistory,
