@@ -183,7 +183,10 @@ name = "example-repo"
 visibility = "internal"
 "#;
         let result: Result<Config, _> = toml::from_str(toml);
-        assert!(result.is_err(), "expected parse error for unknown visibility");
+        assert!(
+            result.is_err(),
+            "expected parse error for unknown visibility"
+        );
     }
 
     #[test]
@@ -195,6 +198,9 @@ name = "example-repo"
 visibility = "Private"
 "#;
         let result: Result<Config, _> = toml::from_str(toml);
-        assert!(result.is_err(), "expected parse error for non-lowercase visibility");
+        assert!(
+            result.is_err(),
+            "expected parse error for non-lowercase visibility"
+        );
     }
 }

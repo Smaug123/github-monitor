@@ -258,6 +258,12 @@ pub struct RulesetRuleParameters {
     pub allowed_merge_methods: Vec<MergeMethod>,
 }
 
+/// App ID of the first-party GitHub Actions GitHub App on github.com. A
+/// required status check pins the app allowed to report it via `integration_id`;
+/// this is the value GitHub records when the check must come from GitHub Actions.
+/// (On GitHub Enterprise Server the ID differs; this crate audits github.com.)
+pub(crate) const GITHUB_ACTIONS_INTEGRATION_ID: u64 = 15368;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredStatusCheck {
     pub context: String,

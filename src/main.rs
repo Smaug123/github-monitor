@@ -212,20 +212,14 @@ where
         .collect()
 }
 
-fn build_planned_repo_fixes(
-    facts: &[RepoFacts],
-    repo_configs: &[RepoConfig],
-) -> Vec<Vec<RepoFix>> {
+fn build_planned_repo_fixes(facts: &[RepoFacts], repo_configs: &[RepoConfig]) -> Vec<Vec<RepoFix>> {
     plan_repo_fix_batches(facts, repo_configs)
         .into_iter()
         .map(|fixes| fixes.into_iter().map(|fix| fix.planned_report()).collect())
         .collect()
 }
 
-fn plan_repo_fix_batches(
-    facts: &[RepoFacts],
-    repo_configs: &[RepoConfig],
-) -> Vec<Vec<PlannedFix>> {
+fn plan_repo_fix_batches(facts: &[RepoFacts], repo_configs: &[RepoConfig]) -> Vec<Vec<PlannedFix>> {
     debug_assert_eq!(facts.len(), repo_configs.len());
     std::iter::zip(facts.iter(), repo_configs.iter())
         .map(|(repo_facts, repo_config)| plan_repo_fixes(&rules_for_repo(repo_config), repo_facts))

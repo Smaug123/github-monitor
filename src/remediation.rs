@@ -12,7 +12,7 @@ use crate::github::types::{
     UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::rules::{
-    RepoSetting, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
+    RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
     active_branch_rulesets_for_default_branch, evaluate_rules,
     legacy_protection_superseded_by_rulesets,
 };
@@ -79,6 +79,7 @@ pub enum FixEffect {
         repo: RepoRef,
         target: PlannedRulesetTarget,
         context: String,
+        source: RequiredCheckSource,
     },
     SetForkPrApprovalPolicy {
         repo: RepoRef,
@@ -216,6 +217,14 @@ struct QueuedEnvrcPullRequest {
     plan: AddEnvrcPullRequestPlan,
 }
 
+/// A required status check the autofix wants present on a ruleset, together with
+/// the app source it must be reported by (see [`RequiredCheckSource`]).
+#[derive(Debug, Clone)]
+struct PlannedRequiredStatusCheck {
+    context: String,
+    source: RequiredCheckSource,
+}
+
 #[derive(Debug, Clone)]
 struct QueuedRulesetUpdate {
     target: PlannedRulesetTarget,
@@ -223,7 +232,7 @@ struct QueuedRulesetUpdate {
     rules_to_add: Vec<RulesetRule>,
     set_pull_request_allowed_merge_methods: Option<Vec<MergeMethod>>,
     set_strict_required_status_checks: Option<bool>,
-    add_required_status_check_contexts: Vec<String>,
+    required_status_checks_to_add: Vec<PlannedRequiredStatusCheck>,
     /// `true` if a `CreateDefaultBranchRuleset` effect contributed to this
     /// queue entry. The apply step uses this to decide between POST (new
     /// ruleset) and GET+PUT (mutate existing). Only meaningful when `target`
@@ -315,10 +324,17 @@ impl FixEffect {
                 )
             }
             Self::EnsureRulesetRequiredStatusCheck {
-                target, context, ..
+                target,
+                context,
+                source,
+                ..
             } => {
+                let from = match source {
+                    RequiredCheckSource::Any => String::new(),
+                    RequiredCheckSource::GitHubActions => " reported by GitHub Actions".to_owned(),
+                };
                 format!(
-                    "require status check `{context}` on ruleset `{}`",
+                    "require status check `{context}`{from} on ruleset `{}`",
                     target.name(),
                 )
             }
@@ -634,13 +650,17 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 );
             }
             FixEffect::EnsureRulesetRequiredStatusCheck {
-                target, context, ..
+                target,
+                context,
+                source,
+                ..
             } => {
                 enqueue_ensure_required_status_check(
                     &mut queued_ruleset_updates,
                     fix.rule_id.clone(),
                     target.clone(),
                     context.clone(),
+                    source.clone(),
                 );
             }
             FixEffect::SetForkPrApprovalPolicy { policy, .. } => {
@@ -817,7 +837,7 @@ fn empty_queued_ruleset_update(
         rules_to_add: Vec::new(),
         set_pull_request_allowed_merge_methods: None,
         set_strict_required_status_checks: None,
-        add_required_status_check_contexts: Vec::new(),
+        required_status_checks_to_add: Vec::new(),
         create: false,
     }
 }
@@ -892,19 +912,28 @@ fn enqueue_ensure_required_status_check(
     rule_id: RuleId,
     target: PlannedRulesetTarget,
     context: String,
+    source: RequiredCheckSource,
 ) {
+    let check = PlannedRequiredStatusCheck { context, source };
     if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
-        if !existing
-            .add_required_status_check_contexts
+        let already_queued = existing
+            .required_status_checks_to_add
             .iter()
-            .any(|existing_context| existing_context == &context)
-        {
-            existing.add_required_status_check_contexts.push(context);
+            .find(|queued| queued.context == check.context)
+            .map(|queued| queued.source.clone());
+        match already_queued {
+            Some(queued_source) => debug_assert!(
+                queued_source == check.source,
+                "conflicting required-status-check sources for context `{}` on ruleset `{}`",
+                check.context,
+                target.name(),
+            ),
+            None => existing.required_status_checks_to_add.push(check),
         }
     } else {
         let mut entry = empty_queued_ruleset_update(target, rule_id);
-        entry.add_required_status_check_contexts.push(context);
+        entry.required_status_checks_to_add.push(check);
         queue.push(entry);
     }
 }
@@ -1045,8 +1074,8 @@ fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRules
     }
 
     let want_strict = queued.set_strict_required_status_checks == Some(true);
-    let want_contexts = !queued.add_required_status_check_contexts.is_empty();
-    if want_strict || want_contexts {
+    let want_checks = !queued.required_status_checks_to_add.is_empty();
+    if want_strict || want_checks {
         let status_rule = match rules
             .iter_mut()
             .find(|rule| rule.kind == RulesetRuleType::RequiredStatusChecks)
@@ -1066,18 +1095,28 @@ fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRules
         if want_strict {
             params.strict_required_status_checks_policy = Some(true);
         }
-        for context in &queued.add_required_status_check_contexts {
-            if !params
+        for check in &queued.required_status_checks_to_add {
+            match params
                 .required_status_checks
-                .iter()
-                .any(|check| check.context == *context)
+                .iter_mut()
+                .find(|existing| existing.context == check.context)
             {
-                params
-                    .required_status_checks
-                    .push(crate::github::types::RequiredStatusCheck {
-                        context: context.clone(),
-                        integration_id: None,
-                    });
+                // A check with the right context but the wrong (or no) reporting
+                // app doesn't satisfy a source-constrained rule, so pin it to the
+                // required app. `Any` accepts any app, so we never clobber an
+                // existing pin in that case.
+                Some(existing) if !check.source.accepts(existing.integration_id) => {
+                    existing.integration_id = check.source.integration_id();
+                }
+                Some(_) => {}
+                None => {
+                    params
+                        .required_status_checks
+                        .push(crate::github::types::RequiredStatusCheck {
+                            context: check.context.clone(),
+                            integration_id: check.source.integration_id(),
+                        });
+                }
             }
         }
     }
@@ -1479,8 +1518,8 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             RuleKind::RulesetRequiresStrictStatusChecks => {
                 plan_set_strict_required_status_checks(facts)
             }
-            RuleKind::RulesetRequiresStatusCheck { check_name } => {
-                plan_ensure_required_status_check(facts, check_name)
+            RuleKind::RulesetRequiresStatusCheck { check_name, source } => {
+                plan_ensure_required_status_check(facts, check_name, source)
             }
             RuleKind::FileExists { path } if path == ENVRC_PATH => {
                 FixPlan::Effect(FixEffect::OpenAddEnvrcPullRequest {
@@ -1623,16 +1662,19 @@ fn merge_method_string_set(methods: &[MergeMethod]) -> std::collections::BTreeSe
     methods.iter().map(|m| String::from(m.clone())).collect()
 }
 
-fn plan_ensure_required_status_check(facts: &RepoFacts, context: &str) -> FixPlan {
+fn plan_ensure_required_status_check(
+    facts: &RepoFacts,
+    context: &str,
+    source: &RequiredCheckSource,
+) -> FixPlan {
     let candidates = active_branch_rulesets_for_default_branch(facts)
         .filter(|ruleset| {
             !ruleset.rules.iter().any(|rule| {
                 rule.kind == RulesetRuleType::RequiredStatusChecks
                     && rule.parameters.as_ref().is_some_and(|parameters| {
-                        parameters
-                            .required_status_checks
-                            .iter()
-                            .any(|check| check.context == context)
+                        parameters.required_status_checks.iter().any(|check| {
+                            check.context == context && source.accepts(check.integration_id)
+                        })
                     })
             })
         })
@@ -1643,6 +1685,7 @@ fn plan_ensure_required_status_check(facts: &RepoFacts, context: &str) -> FixPla
             repo: facts.repo.clone(),
             target: pending_default_branch_target(facts),
             context: context.to_owned(),
+            source: source.clone(),
         }),
         [ruleset] => FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
             repo: facts.repo.clone(),
@@ -1651,6 +1694,7 @@ fn plan_ensure_required_status_check(facts: &RepoFacts, context: &str) -> FixPla
                 name: ruleset.name.clone(),
             },
             context: context.to_owned(),
+            source: source.clone(),
         }),
         many => {
             let names = many
@@ -3899,9 +3943,10 @@ mod tests {
     fn rs012_rule() -> Rule {
         Rule::new(
             "RS012",
-            "all-required-checks-complete status check is required",
+            "all-required-checks-complete status check is required from GitHub Actions",
             RuleKind::RulesetRequiresStatusCheck {
                 check_name: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::GitHubActions,
             },
         )
     }
@@ -3927,11 +3972,12 @@ mod tests {
                     name: "main protection".to_owned(),
                 },
                 context: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::GitHubActions,
             })
         );
         assert_eq!(
             fixes[0].planned_report().description,
-            "require status check `all-required-checks-complete` on ruleset `main protection`"
+            "require status check `all-required-checks-complete` reported by GitHub Actions on ruleset `main protection`"
         );
     }
 
@@ -3965,12 +4011,42 @@ mod tests {
                     name: "main protection".to_owned(),
                 },
                 context: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::GitHubActions,
             })
         );
     }
 
     #[test]
     fn ensure_required_status_check_fix_not_planned_when_check_already_required() {
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredStatusChecks,
+                parameters: Some(RulesetRuleParameters {
+                    required_status_checks: vec![crate::github::types::RequiredStatusCheck {
+                        context: "all-required-checks-complete".to_owned(),
+                        integration_id: Some(15368),
+                    }],
+                    ..RulesetRuleParameters::default()
+                }),
+            }],
+        )];
+
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
+
+        assert!(
+            fixes.is_empty(),
+            "expected no fixes (rule passes), got {fixes:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_required_status_check_fix_planned_when_check_present_but_wrong_source() {
+        // The check exists by context but is reported by "any" app (no pinned
+        // integration_id), so the GitHub-Actions-sourced rule fails and the fix
+        // must target this ruleset to pin the reporting app.
         let mut facts = base_facts();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
@@ -3989,10 +4065,78 @@ mod tests {
 
         let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
-        assert!(
-            fixes.is_empty(),
-            "expected no fixes (rule passes), got {fixes:?}"
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(
+            fixes[0].plan,
+            FixPlan::Effect(FixEffect::EnsureRulesetRequiredStatusCheck {
+                repo: facts.repo.clone(),
+                target: PlannedRulesetTarget::Existing {
+                    id: 42,
+                    name: "main protection".to_owned(),
+                },
+                context: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::GitHubActions,
+            })
         );
+    }
+
+    #[test]
+    fn execute_repo_fixes_pins_existing_check_to_github_actions_source() {
+        // A ruleset already requires `all-required-checks-complete`, but with no
+        // pinned reporting app. The fix must rewrite that check's integration_id
+        // to the GitHub Actions app rather than add a duplicate context.
+        let mut facts = base_facts();
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![RulesetRule {
+                kind: RulesetRuleType::RequiredStatusChecks,
+                parameters: Some(RulesetRuleParameters {
+                    required_status_checks: vec![crate::github::types::RequiredStatusCheck {
+                        context: "all-required-checks-complete".to_owned(),
+                        integration_id: None,
+                    }],
+                    ..RulesetRuleParameters::default()
+                }),
+            }],
+        )];
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
+
+        let server = TestServer::spawn(vec![
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/rulesets/42",
+                |_| {},
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"all-required-checks-complete"}]}}]}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/rulesets/42",
+                |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let rules = json["rules"].as_array().unwrap();
+                    assert_eq!(rules.len(), 1);
+                    let checks = rules[0]["parameters"]["required_status_checks"]
+                        .as_array()
+                        .unwrap();
+                    assert_eq!(checks.len(), 1, "must update in place, not duplicate");
+                    assert_eq!(checks[0]["context"], "all-required-checks-complete");
+                    assert_eq!(checks[0]["integration_id"], 15368);
+                },
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[]}"#
+                    .to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
     }
 
     #[test]
@@ -4086,6 +4230,12 @@ mod tests {
                         .find(|check| check["context"] == "other")
                         .unwrap();
                     assert_eq!(other_check["integration_id"], 7);
+                    // The added check must be pinned to the GitHub Actions app.
+                    let added_check = checks
+                        .iter()
+                        .find(|check| check["context"] == "all-required-checks-complete")
+                        .unwrap();
+                    assert_eq!(added_check["integration_id"], 15368);
                     assert_eq!(params["strict_required_status_checks_policy"], true);
                 },
                 r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[]}"#
@@ -4144,6 +4294,7 @@ mod tests {
                         contexts,
                         ["all-required-checks-complete"].into_iter().collect()
                     );
+                    assert_eq!(checks[0]["integration_id"], 15368);
                 },
                 r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[]}"#
                     .to_owned(),
@@ -4486,6 +4637,7 @@ mod tests {
                     name: DEFAULT_BRANCH_RULESET_NAME.to_owned(),
                 },
                 context: "all-required-checks-complete".to_owned(),
+                source: RequiredCheckSource::GitHubActions,
             })
         );
         assert_eq!(
@@ -4521,13 +4673,13 @@ mod tests {
                 assert_eq!(rules[0]["type"], "required_status_checks");
                 let params = &rules[0]["parameters"];
                 assert_eq!(params["strict_required_status_checks_policy"], true);
-                let contexts: BTreeSet<&str> = params["required_status_checks"]
-                    .as_array()
-                    .unwrap()
+                let checks = params["required_status_checks"].as_array().unwrap();
+                let contexts: BTreeSet<&str> = checks
                     .iter()
                     .map(|check| check["context"].as_str().unwrap())
                     .collect();
                 assert_eq!(contexts, ["all-required-checks-complete"].into_iter().collect());
+                assert_eq!(checks[0]["integration_id"], 15368);
             },
             r#"{"id":99,"name":"github-infra: default branch protection","target":"branch","enforcement":"active"}"#.to_owned(),
         )]);
