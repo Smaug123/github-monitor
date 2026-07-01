@@ -10,41 +10,8 @@ use crate::github::types::{
     BranchProtection, ContentEncoding, DefaultWorkflowPermissions, ForkPrApprovalPolicy,
     GitTreeEntryType, Repository, Ruleset,
 };
-use crate::types::{BranchName, RepoRef};
+use crate::types::{BranchName, Gathered, RepoRef};
 use crate::workflow::model::Workflow;
-
-/// A fact gathered from GitHub that may legitimately be absent, but whose presence
-/// in a snapshot is mandatory. Unlike a bare `Option<T>` — which serde silently
-/// reads as `None` when the field is missing from the JSON — a snapshot that omits
-/// a `Gathered` field fails to load. That keeps "gathered and verified absent"
-/// (`Absent`) distinct from "never recorded" (a load error), so a rule can never
-/// pass or fail vacuously on a value that was simply never captured.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Gathered<T> {
-    Present(T),
-    Absent,
-}
-
-impl<T> Gathered<T> {
-    pub fn from_option(value: Option<T>) -> Self {
-        match value {
-            Some(value) => Self::Present(value),
-            None => Self::Absent,
-        }
-    }
-
-    pub fn as_option(&self) -> Option<&T> {
-        match self {
-            Self::Present(value) => Some(value),
-            Self::Absent => None,
-        }
-    }
-
-    pub fn is_present(&self) -> bool {
-        matches!(self, Self::Present(_))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoSettings {

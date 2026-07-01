@@ -2,6 +2,47 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// A fact gathered from GitHub. Distinguishes three outcomes that must never be
+/// conflated: the value is `Present`; it was queried and verified `Absent`; or it
+/// could not be determined (`Unknown` — e.g. the token lacks the permission to
+/// read it, so the endpoint 404s). Unlike a bare `Option<T>` — which serde
+/// silently reads as `None` for a missing field — a snapshot that omits a
+/// `Gathered` field fails to load, so a never-recorded fact can never masquerade
+/// as `Absent`. A rule that reads an `Unknown` fact must return `Error`, never a
+/// definite verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Gathered<T> {
+    Present(T),
+    Absent,
+    Unknown,
+}
+
+impl<T> Gathered<T> {
+    /// Maps `Some`/`None` to `Present`/`Absent`. Only for endpoints whose `None`
+    /// genuinely means "verified absent"; a `None` that means "could not read"
+    /// must be mapped to [`Gathered::Unknown`] explicitly.
+    pub fn from_option(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::Present(value),
+            None => Self::Absent,
+        }
+    }
+
+    /// The value when `Present`, else `None`. `Absent` and `Unknown` both yield
+    /// `None`; a caller that must distinguish them has to match explicitly.
+    pub fn as_option(&self) -> Option<&T> {
+        match self {
+            Self::Present(value) => Some(value),
+            Self::Absent | Self::Unknown => None,
+        }
+    }
+
+    pub fn is_present(&self) -> bool {
+        matches!(self, Self::Present(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Owner(String);
 

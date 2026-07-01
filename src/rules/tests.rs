@@ -6,7 +6,7 @@ use super::glob::{branch_matches_filters, branch_pattern_matches};
 use super::workflows::is_commit_sha;
 use super::*;
 use crate::config::{RepoConfig, Visibility};
-use crate::facts::{Gathered, RepoFacts, RepoSettings, WorkflowFile};
+use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
     BranchProtection, BypassActor, BypassActorType, BypassMode, DefaultWorkflowPermissions,
     ForkPrApprovalPolicy, LegacyEnabledFlag, LegacyRequiredPullRequestReviews,
@@ -14,7 +14,7 @@ use crate::github::types::{
     RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
     RulesetRuleParameters, RulesetRuleType, RulesetTarget,
 };
-use crate::types::{BranchName, RepoRef, RuleId};
+use crate::types::{BranchName, Gathered, RepoRef, RuleId};
 use crate::workflow::model::{
     ActionRef, ActionReference, ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step,
     StepKind, TriggerFilter, Triggers, Workflow, WorkflowDispatch, WorkflowRun,
