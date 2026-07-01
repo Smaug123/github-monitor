@@ -604,6 +604,22 @@ mod tests {
         ]
     }
 
+    /// Unmodeled parameter keys GitHub may attach to a rule. Keys are synthetic and
+    /// disjoint from the modeled fields; values are limited to strings/bools so JSON
+    /// round-trip equality is exact.
+    fn ruleset_extra_parameters_strategy(
+    ) -> impl Strategy<Value = serde_json::Map<String, serde_json::Value>> {
+        proptest::collection::btree_map(
+            "x_extra_[a-z]{1,8}",
+            prop_oneof![
+                text().prop_map(serde_json::Value::String),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+            ],
+            0..3,
+        )
+        .prop_map(|map| map.into_iter().collect())
+    }
+
     fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParameters> {
         (
             proptest::collection::vec(required_status_check_strategy(), 0..3),
@@ -615,6 +631,7 @@ mod tests {
             proptest::option::of(any::<bool>()),
             proptest::option::of(any::<bool>()),
             proptest::collection::vec(merge_method_strategy(), 0..4),
+            ruleset_extra_parameters_strategy(),
         )
             .prop_map(
                 |(
@@ -627,6 +644,7 @@ mod tests {
                     dismiss_stale_reviews_on_push,
                     do_not_enforce_on_create,
                     allowed_merge_methods,
+                    extra,
                 )| RulesetRuleParameters {
                     required_status_checks,
                     strict_required_status_checks_policy,
@@ -637,6 +655,7 @@ mod tests {
                     dismiss_stale_reviews_on_push,
                     do_not_enforce_on_create,
                     allowed_merge_methods,
+                    extra,
                 },
             )
     }
@@ -936,6 +955,7 @@ mod tests {
                         dismiss_stale_reviews_on_push: None,
                         do_not_enforce_on_create: None,
                         allowed_merge_methods: Vec::new(),
+                        extra: serde_json::Map::new(),
                     }),
                 }],
             }],
@@ -993,6 +1013,73 @@ mod tests {
             let json = serde_json::to_string(&facts).unwrap();
             let deserialized: RepoFacts = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(deserialized, facts);
+        }
+    }
+
+    proptest! {
+        /// Finding 2, generalized: the ruleset write body (`UpdateRulesetRequest`) is a
+        /// full replacement, so every parameter GitHub sends — including rule types and
+        /// fields the model doesn't understand — must be echoed back verbatim, or a fix
+        /// silently resets it (or 422s, for required parameters).
+        ///
+        /// We take a generated ruleset, serialize it the way GitHub would return it,
+        /// then decorate every rule with an unmodeled parameter and append an unknown
+        /// rule type carrying required parameters. The write body must preserve every
+        /// key present in that response. Because the response is itself a serialization,
+        /// re-serializing the modeled keys is idempotent, so the only way containment can
+        /// fail is by dropping the unmodeled data — exactly finding 2.
+        #[test]
+        fn ruleset_write_body_preserves_unmodeled_rule_parameters(
+            ruleset in ruleset_strategy(),
+        ) {
+            use crate::github::types::UpdateRulesetRequest;
+
+            let probe_key = "x_unmodeled_probe";
+            let probe_value = serde_json::json!({ "kept": [true, "verbatim"] });
+
+            let mut response = serde_json::to_value(&ruleset).expect("ruleset serializes");
+            // An empty `rules` is omitted by `skip_serializing_if`, so materialize the
+            // array before decorating it.
+            let rules = response
+                .as_object_mut()
+                .expect("ruleset is an object")
+                .entry("rules")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("rules is an array");
+            for rule in rules.iter_mut() {
+                let rule = rule.as_object_mut().expect("rule is an object");
+                rule.entry("parameters")
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+                    .as_object_mut()
+                    .expect("parameters is an object")
+                    .insert(probe_key.to_owned(), probe_value.clone());
+            }
+            rules.push(serde_json::json!({
+                "type": "commit_message_pattern",
+                "parameters": { "operator": "starts_with", "pattern": "X" },
+            }));
+
+            let parsed: Ruleset =
+                serde_json::from_value(response.clone()).expect("decorated response deserializes");
+            let body = serde_json::to_value(UpdateRulesetRequest::from_ruleset(&parsed))
+                .expect("write body serializes");
+
+            let input_rules = response["rules"].as_array().expect("response has rules");
+            let output_rules = body["rules"].as_array().expect("write body has rules");
+            prop_assert_eq!(output_rules.len(), input_rules.len());
+
+            for (input, output) in input_rules.iter().zip(output_rules) {
+                for (key, value) in input["parameters"].as_object().expect("params object") {
+                    prop_assert_eq!(
+                        output["parameters"].get(key),
+                        Some(value),
+                        "rule `{}` dropped or altered parameter `{}` on GET-modify-PUT",
+                        input["type"].to_string(),
+                        key
+                    );
+                }
+            }
         }
     }
 
