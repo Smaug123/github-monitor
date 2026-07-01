@@ -47,6 +47,7 @@ fn repo_ref_strategy() -> impl Strategy<Value = RepoRef> {
 fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Gathered<ForkPrApprovalPolicy>> {
     prop_oneof![
         Just(Gathered::Absent),
+        Just(Gathered::Unknown),
         Just(Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)),
         Just(Gathered::Present(
             ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub
@@ -388,6 +389,7 @@ fn repo_facts_strategy() -> impl Strategy<Value = RepoFacts> {
         proptest::collection::vec(ruleset_strategy(), 0..4),
         prop_oneof![
             Just(Gathered::Absent),
+            Just(Gathered::Unknown),
             Just(Gathered::Present(BranchProtection::default())),
         ],
         identifier(),
@@ -1067,6 +1069,29 @@ fn repo_setting_match_errors_when_boolean_setting_is_unknown() {
 }
 
 #[test]
+fn repo_setting_match_errors_when_fork_pr_approval_policy_unknown() {
+    let mut facts = base_facts();
+    // The fork-PR approval endpoint 404'd (token can't read it): the policy is
+    // unknown, not "unset". ST007 must Error rather than report non-compliance.
+    facts.settings.fork_pr_approval_policy = Gathered::Unknown;
+
+    let result = evaluate(
+        &RuleKind::RepoSettingMatch {
+            setting: RepoSetting::ForkPrApprovalPolicy,
+            expected: SettingValue::ForkPrApprovalPolicy(Some(
+                ForkPrApprovalPolicy::AllExternalContributors,
+            )),
+        },
+        &facts,
+    );
+
+    assert!(
+        matches!(result, RuleResult::Error { .. }),
+        "an unknown fork-PR approval policy must Error, not fail vacuously; got {result:?}",
+    );
+}
+
+#[test]
 fn repo_setting_match_reads_boolean_settings() {
     let mut facts = base_facts();
     facts.settings.allow_auto_merge = Some(true);
@@ -1238,6 +1263,20 @@ fn uses_rulesets_not_legacy_protection_fails_when_legacy_protection_present() {
         evaluate(&RuleKind::UsesRulesetsNotLegacyProtection, &facts),
         RuleResult::Fail { .. }
     ));
+}
+
+#[test]
+fn uses_rulesets_not_legacy_protection_errors_when_protection_unknown() {
+    let mut facts = base_facts();
+    // We could not determine whether legacy protection exists (e.g. the endpoint
+    // was unreadable): neither Pass nor Fail is justified.
+    facts.legacy_branch_protection = Gathered::Unknown;
+
+    let result = evaluate(&RuleKind::UsesRulesetsNotLegacyProtection, &facts);
+    assert!(
+        matches!(result, RuleResult::Error { .. }),
+        "unknown legacy protection must Error, not pass/fail vacuously; got {result:?}",
+    );
 }
 
 #[test]

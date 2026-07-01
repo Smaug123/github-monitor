@@ -1,4 +1,5 @@
 use crate::facts::RepoFacts;
+use crate::types::Gathered;
 use std::collections::BTreeSet;
 
 use crate::github::types::{
@@ -85,16 +86,17 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
             evaluate_allowed_merge_methods(facts, allowed)
         }
         RuleKind::RulesetRequiresStrictStatusChecks => evaluate_strict_status_checks(facts),
-        RuleKind::UsesRulesetsNotLegacyProtection => {
-            if facts.legacy_branch_protection.is_present() {
-                RuleResult::Fail {
-                    reason: "legacy branch protection is configured on the default branch"
-                        .to_owned(),
-                }
-            } else {
-                RuleResult::Pass
-            }
-        }
+        RuleKind::UsesRulesetsNotLegacyProtection => match facts.legacy_branch_protection {
+            Gathered::Present(_) => RuleResult::Fail {
+                reason: "legacy branch protection is configured on the default branch".to_owned(),
+            },
+            Gathered::Absent => RuleResult::Pass,
+            Gathered::Unknown => RuleResult::Error {
+                reason: "could not determine whether legacy branch protection is configured on \
+                         the default branch"
+                    .to_owned(),
+            },
+        },
         _ => unreachable!("non-ruleset rule passed to rulesets::evaluate"),
     }
 }

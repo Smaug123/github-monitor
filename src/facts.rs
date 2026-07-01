@@ -38,7 +38,7 @@ pub struct RepoSettings {
 impl RepoSettings {
     pub fn new(
         repository: &Repository,
-        fork_pr_approval_policy: Option<ForkPrApprovalPolicy>,
+        fork_pr_approval_policy: Gathered<ForkPrApprovalPolicy>,
         default_workflow_permissions: DefaultWorkflowPermissions,
     ) -> Self {
         Self {
@@ -51,7 +51,7 @@ impl RepoSettings {
             allow_squash_merge: repository.allow_squash_merge,
             allow_merge_commit: repository.allow_merge_commit,
             allow_rebase_merge: repository.allow_rebase_merge,
-            fork_pr_approval_policy: Gathered::from_option(fork_pr_approval_policy),
+            fork_pr_approval_policy,
             default_workflow_permissions,
         }
     }
@@ -91,9 +91,7 @@ pub fn gather_repo_facts(
 ) -> Result<RepoFacts, FactsError> {
     let repository = client.get_repo(&repo)?;
     let default_branch = repository.default_branch.clone();
-    let fork_pr_approval_policy = client
-        .get_fork_pr_approval_permission(&repo)?
-        .map(|permission| permission.approval_policy);
+    let fork_pr_approval_policy = client.get_fork_pr_approval_permission(&repo)?;
     let default_workflow_permissions = client
         .get_workflow_permissions(&repo)?
         .default_workflow_permissions;
@@ -436,6 +434,7 @@ mod tests {
     fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Gathered<ForkPrApprovalPolicy>> {
         prop_oneof![
             Just(Gathered::Absent),
+            Just(Gathered::Unknown),
             Just(Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)),
             Just(Gathered::Present(
                 ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub
@@ -796,6 +795,7 @@ mod tests {
             proptest::collection::vec(ruleset_strategy(), 0..3),
             prop_oneof![
                 Just(Gathered::Absent),
+                Just(Gathered::Unknown),
                 Just(Gathered::Present(BranchProtection::default())),
             ],
             identifier(),
@@ -973,6 +973,10 @@ mod tests {
         path: &'static [&'static str],
         present: fn() -> serde_json::Value,
         contrasting: fn() -> serde_json::Value,
+        /// The JSON for "gathered but could not be determined". Setting the field
+        /// to this must make every observing rule `Error` — the represented-unknown
+        /// counterpart to *removing* the key (which must fail to load).
+        unknown: fn() -> serde_json::Value,
     }
 
     /// The `RepoFacts`-layer facts whose *presence in a snapshot* is mandatory.
@@ -990,6 +994,7 @@ mod tests {
                 contrasting: || {
                     serde_json::to_value(Gathered::<BranchProtection>::Absent).unwrap()
                 },
+                unknown: || serde_json::to_value(Gathered::<BranchProtection>::Unknown).unwrap(),
             },
             HoleableFact {
                 name: "settings.fork_pr_approval_policy",
@@ -1005,6 +1010,9 @@ mod tests {
                         ForkPrApprovalPolicy::FirstTimeContributors,
                     ))
                     .unwrap()
+                },
+                unknown: || {
+                    serde_json::to_value(Gathered::<ForkPrApprovalPolicy>::Unknown).unwrap()
                 },
             },
         ]
@@ -1079,7 +1087,25 @@ mod tests {
                     continue;
                 }
 
-                // Make the field unknown by dropping it from the snapshot entirely.
+                // Represented unknown: an explicit "unknown" value must make every
+                // observing rule Error — never a definite verdict.
+                let unknown_json = set_field(base.clone(), field.path, (field.unknown)());
+                let unknown_facts: RepoFacts = serde_json::from_value(unknown_json)
+                    .expect("unknown value must deserialize");
+                let unknown_out = evaluate_rules(&rules, &unknown_facts);
+                for &i in &observing {
+                    prop_assert!(
+                        matches!(unknown_out[i].result, RuleResult::Error { .. }),
+                        "field `{}` was Unknown, but rule `{}` returned {:?}; a rule that \
+                         reads an unknown fact must return Error",
+                        field.name,
+                        unknown_out[i].id,
+                        unknown_out[i].result,
+                    );
+                }
+
+                // Omitted key: absence must be unrepresentable — the snapshot fails
+                // to load rather than defaulting to a definite verdict.
                 let holed_json = remove_field(present_json, field.path);
                 let Ok(holed_facts) = serde_json::from_value::<RepoFacts>(holed_json) else {
                     // Absence is unrepresentable: the snapshot fails to load. OK.
@@ -1087,7 +1113,7 @@ mod tests {
                 };
 
                 let holed_out = evaluate_rules(&rules, &holed_facts);
-                for i in observing {
+                for &i in &observing {
                     prop_assert!(
                         matches!(holed_out[i].result, RuleResult::Error { .. }),
                         "field `{}` was absent from the snapshot, but rule `{}` returned \

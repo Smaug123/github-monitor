@@ -37,10 +37,6 @@ impl<T> Gathered<T> {
             Self::Absent | Self::Unknown => None,
         }
     }
-
-    pub fn is_present(&self) -> bool {
-        matches!(self, Self::Present(_))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
