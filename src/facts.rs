@@ -946,6 +946,134 @@ mod tests {
         }
     }
 
+    /// A security-relevant fact whose *absence* from a snapshot the invariant below
+    /// probes. `present`/`contrasting` are two concrete JSON values for the field;
+    /// the fact that some rule's verdict differs between them is what proves the
+    /// rule *observes* the field, so no hand-maintained rule->field map is needed.
+    struct HoleableFact {
+        name: &'static str,
+        /// Object-key path to the field inside a serialized `RepoFacts`.
+        path: &'static [&'static str],
+        present: fn() -> serde_json::Value,
+        contrasting: fn() -> serde_json::Value,
+    }
+
+    /// The `RepoFacts`-layer fields that currently carry `#[serde(default)]`, so a
+    /// snapshot missing them loads as `None` rather than failing. Each is a
+    /// candidate for either Mechanism B (drop the default -> absence fails to parse)
+    /// or Mechanism A (keep the option but make the reading rule return `Error`).
+    fn holeable_facts() -> Vec<HoleableFact> {
+        vec![
+            HoleableFact {
+                name: "legacy_branch_protection",
+                path: &["legacy_branch_protection"],
+                present: || serde_json::to_value(BranchProtection::default()).unwrap(),
+                contrasting: || serde_json::Value::Null,
+            },
+            HoleableFact {
+                name: "settings.fork_pr_approval_policy",
+                path: &["settings", "fork_pr_approval_policy"],
+                present: || {
+                    serde_json::to_value(ForkPrApprovalPolicy::AllExternalContributors).unwrap()
+                },
+                contrasting: || {
+                    serde_json::to_value(ForkPrApprovalPolicy::FirstTimeContributors).unwrap()
+                },
+            },
+        ]
+    }
+
+    fn parent_object<'a>(
+        root: &'a mut serde_json::Value,
+        path: &[&str],
+    ) -> &'a mut serde_json::Map<String, serde_json::Value> {
+        let mut node = root;
+        for key in &path[..path.len() - 1] {
+            node = node
+                .get_mut(*key)
+                .expect("intermediate path element must exist");
+        }
+        node.as_object_mut().expect("parent of field must be an object")
+    }
+
+    fn set_field(
+        mut root: serde_json::Value,
+        path: &[&str],
+        value: serde_json::Value,
+    ) -> serde_json::Value {
+        let last = *path.last().expect("path must be non-empty");
+        parent_object(&mut root, path).insert(last.to_owned(), value);
+        root
+    }
+
+    fn remove_field(mut root: serde_json::Value, path: &[&str]) -> serde_json::Value {
+        let last = *path.last().expect("path must be non-empty");
+        parent_object(&mut root, path).remove(last);
+        root
+    }
+
+    proptest! {
+        /// P2: an *absent* (unknown) security-relevant fact must never produce a
+        /// definite verdict. For a fact that some rule observes, either the snapshot
+        /// fails to load (absence is unrepresentable) or every rule reading the
+        /// now-unknown fact returns `Error` — never `Pass`/`Fail`/`Skip`.
+        ///
+        /// RED today: `legacy_branch_protection` and `fork_pr_approval_policy` both
+        /// carry `#[serde(default)]`, so a snapshot missing them loads as `None` and
+        /// RS007/ST007 return a definite `Pass`/`Fail` from an unknown.
+        #[test]
+        fn absent_security_fact_never_yields_a_definite_verdict(
+            facts in repo_facts_strategy(),
+        ) {
+            use crate::rules::{default_rules, evaluate_rules, RuleResult};
+
+            let rules = default_rules();
+            let base = serde_json::to_value(&facts).expect("facts serialize");
+
+            for field in holeable_facts() {
+                let present_json = set_field(base.clone(), field.path, (field.present)());
+                let contrasting_json = set_field(base.clone(), field.path, (field.contrasting)());
+
+                let present_facts: RepoFacts = serde_json::from_value(present_json.clone())
+                    .expect("present value must deserialize");
+                let contrasting_facts: RepoFacts = serde_json::from_value(contrasting_json)
+                    .expect("contrasting value must deserialize");
+
+                let present_out = evaluate_rules(&rules, &present_facts);
+                let contrasting_out = evaluate_rules(&rules, &contrasting_facts);
+
+                // Rules that observe this field: their verdict moves when it does.
+                let observing: Vec<usize> = (0..rules.len())
+                    .filter(|&i| present_out[i].result != contrasting_out[i].result)
+                    .collect();
+                if observing.is_empty() {
+                    // Not observable in this sample; nothing to prove for this field.
+                    continue;
+                }
+
+                // Make the field unknown by dropping it from the snapshot entirely.
+                let holed_json = remove_field(present_json, field.path);
+                let Ok(holed_facts) = serde_json::from_value::<RepoFacts>(holed_json) else {
+                    // Absence is unrepresentable: the snapshot fails to load. OK.
+                    continue;
+                };
+
+                let holed_out = evaluate_rules(&rules, &holed_facts);
+                for i in observing {
+                    prop_assert!(
+                        matches!(holed_out[i].result, RuleResult::Error { .. }),
+                        "field `{}` was absent from the snapshot, but rule `{}` returned \
+                         {:?}; a rule that reads an unknown fact must return Error, never a \
+                         definite verdict",
+                        field.name,
+                        holed_out[i].id,
+                        holed_out[i].result,
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn snapshot_save_then_load_preserves_facts() {
         let snapshot_dir = unique_temp_dir();
