@@ -91,12 +91,12 @@ fn repo_settings_strategy() -> impl Strategy<Value = RepoSettings> {
                 private,
                 archived,
                 disabled,
-                allow_auto_merge,
-                delete_branch_on_merge,
-                allow_update_branch,
-                allow_squash_merge,
-                allow_merge_commit,
-                allow_rebase_merge,
+                allow_auto_merge: Some(allow_auto_merge),
+                delete_branch_on_merge: Some(delete_branch_on_merge),
+                allow_update_branch: Some(allow_update_branch),
+                allow_squash_merge: Some(allow_squash_merge),
+                allow_merge_commit: Some(allow_merge_commit),
+                allow_rebase_merge: Some(allow_rebase_merge),
                 fork_pr_approval_policy,
                 default_workflow_permissions,
             },
@@ -547,12 +547,12 @@ fn empty_repo_settings() -> RepoSettings {
         private: false,
         archived: false,
         disabled: false,
-        allow_auto_merge: false,
-        delete_branch_on_merge: false,
-        allow_update_branch: false,
-        allow_squash_merge: false,
-        allow_merge_commit: false,
-        allow_rebase_merge: false,
+        allow_auto_merge: Some(false),
+        delete_branch_on_merge: Some(false),
+        allow_update_branch: Some(false),
+        allow_squash_merge: Some(false),
+        allow_merge_commit: Some(false),
+        allow_rebase_merge: Some(false),
         fork_pr_approval_policy: None,
         default_workflow_permissions: DefaultWorkflowPermissions::Read,
     }
@@ -1041,9 +1041,30 @@ fn workflow_uses_action_matches_repository_actions() {
 }
 
 #[test]
+fn repo_setting_match_errors_when_boolean_setting_is_unknown() {
+    let mut facts = base_facts();
+    // GitHub omitted the flag (mis-scoped token): the fact is unknown, not `false`.
+    facts.settings.allow_merge_commit = None;
+
+    let result = evaluate(
+        &RuleKind::RepoSettingMatch {
+            setting: RepoSetting::AllowMergeCommit,
+            expected: SettingValue::Bool(false),
+        },
+        &facts,
+    );
+
+    assert!(
+        matches!(result, RuleResult::Error { .. }),
+        "an unknown (None) boolean setting must Error, not pass vacuously against \
+         `expected: false`; got {result:?}",
+    );
+}
+
+#[test]
 fn repo_setting_match_reads_boolean_settings() {
     let mut facts = base_facts();
-    facts.settings.allow_auto_merge = true;
+    facts.settings.allow_auto_merge = Some(true);
 
     assert_eq!(
         evaluate(

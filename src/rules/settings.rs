@@ -1,11 +1,20 @@
 use crate::facts::RepoFacts;
 
-use super::{RuleKind, RuleResult};
+use super::{RuleKind, RuleResult, SettingValue};
 
 pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     match kind {
         RuleKind::RepoSettingMatch { setting, expected } => {
             let actual = setting.read(&facts.settings);
+            if let SettingValue::UnknownBool = actual {
+                return RuleResult::Error {
+                    reason: format!(
+                        "repository setting `{}` was not reported by GitHub; the token may lack \
+                         the permission needed to read it",
+                        setting.name(),
+                    ),
+                };
+            }
             if &actual == expected {
                 RuleResult::Pass
             } else {

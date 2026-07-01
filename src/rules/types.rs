@@ -55,12 +55,20 @@ impl RepoSetting {
             Self::Private => SettingValue::Bool(settings.private),
             Self::Archived => SettingValue::Bool(settings.archived),
             Self::Disabled => SettingValue::Bool(settings.disabled),
-            Self::AllowAutoMerge => SettingValue::Bool(settings.allow_auto_merge),
-            Self::DeleteBranchOnMerge => SettingValue::Bool(settings.delete_branch_on_merge),
-            Self::AllowUpdateBranch => SettingValue::Bool(settings.allow_update_branch),
-            Self::AllowSquashMerge => SettingValue::Bool(settings.allow_squash_merge),
-            Self::AllowMergeCommit => SettingValue::Bool(settings.allow_merge_commit),
-            Self::AllowRebaseMerge => SettingValue::Bool(settings.allow_rebase_merge),
+            Self::AllowAutoMerge => SettingValue::from_optional_bool(settings.allow_auto_merge),
+            Self::DeleteBranchOnMerge => {
+                SettingValue::from_optional_bool(settings.delete_branch_on_merge)
+            }
+            Self::AllowUpdateBranch => {
+                SettingValue::from_optional_bool(settings.allow_update_branch)
+            }
+            Self::AllowSquashMerge => {
+                SettingValue::from_optional_bool(settings.allow_squash_merge)
+            }
+            Self::AllowMergeCommit => SettingValue::from_optional_bool(settings.allow_merge_commit),
+            Self::AllowRebaseMerge => {
+                SettingValue::from_optional_bool(settings.allow_rebase_merge)
+            }
             Self::ForkPrApprovalPolicy => {
                 SettingValue::ForkPrApprovalPolicy(settings.fork_pr_approval_policy.clone())
             }
@@ -74,14 +82,27 @@ impl RepoSetting {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SettingValue {
     Bool(bool),
+    /// A boolean setting GitHub did not report (the token lacks permission to read
+    /// it). Distinct from `Bool(false)`: a rule that reads it must `Error`, never
+    /// pass or fail vacuously. Only ever produced by reading actual facts; rule
+    /// expectations are always concrete.
+    UnknownBool,
     ForkPrApprovalPolicy(Option<ForkPrApprovalPolicy>),
     DefaultWorkflowPermissions(DefaultWorkflowPermissions),
 }
 
 impl SettingValue {
+    pub(super) fn from_optional_bool(value: Option<bool>) -> Self {
+        match value {
+            Some(value) => Self::Bool(value),
+            None => Self::UnknownBool,
+        }
+    }
+
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Bool(value) => value.to_string(),
+            Self::UnknownBool => "unknown (not reported by GitHub)".to_owned(),
             Self::ForkPrApprovalPolicy(Some(policy)) => String::from(policy.clone()),
             Self::ForkPrApprovalPolicy(None) => "unknown".to_owned(),
             Self::DefaultWorkflowPermissions(value) => String::from(value.clone()),
@@ -91,7 +112,9 @@ impl SettingValue {
     pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
-            Self::ForkPrApprovalPolicy(_) | Self::DefaultWorkflowPermissions(_) => None,
+            Self::UnknownBool
+            | Self::ForkPrApprovalPolicy(_)
+            | Self::DefaultWorkflowPermissions(_) => None,
         }
     }
 }

@@ -58,24 +58,23 @@ macro_rules! string_enum {
 pub struct Repository {
     pub name: RepoName,
     pub default_branch: BranchName,
-    #[serde(default)]
+    // `private`/`archived`/`disabled` are returned by `GET /repos` for every
+    // caller, so they are required: a missing one is a malformed response, not a
+    // silent `false`.
     pub private: bool,
-    #[serde(default)]
     pub archived: bool,
-    #[serde(default)]
     pub disabled: bool,
-    #[serde(default)]
-    pub allow_auto_merge: bool,
-    #[serde(default)]
-    pub delete_branch_on_merge: bool,
-    #[serde(default)]
-    pub allow_update_branch: bool,
-    #[serde(default)]
-    pub allow_squash_merge: bool,
-    #[serde(default)]
-    pub allow_merge_commit: bool,
-    #[serde(default)]
-    pub allow_rebase_merge: bool,
+    // GitHub omits the merge-policy booleans from `GET /repos` when the caller
+    // lacks permission to read them (e.g. a mis-scoped token). `None` therefore
+    // means "not reported by the API" — an unknown, distinct from a definite
+    // `false`. Serde maps a missing `Option` field to `None`, which is exactly
+    // the unknown we want to preserve for the rules to turn into `Error`.
+    pub allow_auto_merge: Option<bool>,
+    pub delete_branch_on_merge: Option<bool>,
+    pub allow_update_branch: Option<bool>,
+    pub allow_squash_merge: Option<bool>,
+    pub allow_merge_commit: Option<bool>,
+    pub allow_rebase_merge: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
