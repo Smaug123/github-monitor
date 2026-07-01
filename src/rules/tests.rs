@@ -187,6 +187,7 @@ fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParame
                 dismiss_stale_reviews_on_push,
                 do_not_enforce_on_create,
                 allowed_merge_methods,
+                extra: serde_json::Map::new(),
             },
         )
 }
@@ -1903,6 +1904,7 @@ fn ruleset_requires_status_check_passes_when_check_exists() {
             dismiss_stale_reviews_on_push: None,
             do_not_enforce_on_create: None,
             allowed_merge_methods: Vec::new(),
+            extra: serde_json::Map::new(),
         }),
     }])];
 

@@ -163,7 +163,7 @@ pub struct PullRequest {
     pub html_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ruleset {
     pub id: u64,
     pub name: String,
@@ -177,7 +177,7 @@ pub struct Ruleset {
     pub rules: Vec<RulesetRule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UpdateRulesetRequest {
     pub name: String,
     pub target: RulesetTarget,
@@ -227,7 +227,7 @@ pub struct BypassActor {
     pub bypass_mode: BypassMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RulesetRule {
     #[serde(rename = "type")]
     pub kind: RulesetRuleType,
@@ -235,7 +235,16 @@ pub struct RulesetRule {
     pub parameters: Option<RulesetRuleParameters>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+// `PUT /repos/{o}/{r}/rulesets/{id}` replaces the whole ruleset, so a fix's
+// GET-modify-PUT re-sends every rule it didn't touch. We only model the parameters
+// the rules reason about; `extra` carries through everything else — parameters of
+// rule types we don't model, and new fields GitHub adds to types we do — so a fix
+// never silently resets configuration (or 422s by re-sending required parameters as
+// `{}`). A rule's `parameters` object is entirely writable, so echoing unknown keys
+// back is safe; contrast the top-level ruleset, whose read-only fields are excluded
+// by construction via the separate `UpdateRulesetRequest` shape. `serde_json::Value`
+// isn't `Eq`, which is why this struct and its containers are `PartialEq`-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RulesetRuleParameters {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_status_checks: Vec<RequiredStatusCheck>,
@@ -255,6 +264,11 @@ pub struct RulesetRuleParameters {
     pub do_not_enforce_on_create: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_merge_methods: Vec<MergeMethod>,
+    /// Unmodeled parameters, carried through GET-modify-PUT verbatim. An empty map
+    /// flattens to nothing, so a rule with only modeled parameters serializes as
+    /// before.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// App ID of the first-party GitHub Actions GitHub App on github.com. A
@@ -948,5 +962,86 @@ mod tests {
             }
             RepositoryContents::File(_) => panic!("expected directory contents"),
         }
+    }
+
+    /// Finding 2: `--fix` fetches a ruleset, edits it, and PUTs the whole thing back
+    /// (`PUT /repos/{o}/{r}/rulesets/{id}` is a full replacement). Any rule parameter
+    /// the model doesn't understand must survive that GET-modify-PUT, or the write
+    /// silently resets configuration GitHub still enforces — and for a rule type whose
+    /// parameters are *required* (e.g. `commit_message_pattern`), re-sending `{}` 422s
+    /// the entire update, permanently blocking remediation on that ruleset.
+    ///
+    /// The write body is `UpdateRulesetRequest::from_ruleset`; this asserts it carries
+    /// through both an unmodeled field on a *known* rule type and every parameter of an
+    /// *unknown* rule type.
+    ///
+    /// RED today: unmodeled parameters deserialize into an empty struct and re-serialize
+    /// as `{}`.
+    #[test]
+    fn write_body_preserves_unmodeled_and_unknown_rule_parameters() {
+        // A GET /repos/{o}/{r}/rulesets/{id} response as GitHub returns it.
+        let response = serde_json::json!({
+            "id": 42,
+            "name": "main protection",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+            "bypass_actors": [],
+            "rules": [
+                {
+                    "type": "pull_request",
+                    "parameters": {
+                        "required_approving_review_count": 1,
+                        // Unmodeled today; resetting it to GitHub's default would silently
+                        // change a review policy the org configured.
+                        "automatic_copilot_code_review_enabled": true
+                    }
+                },
+                {
+                    // A rule type the model doesn't know. Its parameters are *required*:
+                    // re-sending `{}` 422s the whole ruleset update.
+                    "type": "commit_message_pattern",
+                    "parameters": {
+                        "operator": "starts_with",
+                        "pattern": "PROJ-"
+                    }
+                }
+            ]
+        });
+
+        let ruleset: Ruleset =
+            serde_json::from_value(response).expect("ruleset response must deserialize");
+        let body = serde_json::to_value(UpdateRulesetRequest::from_ruleset(&ruleset))
+            .expect("write body must serialize");
+
+        let rules = body["rules"].as_array().expect("write body has a rules array");
+        let params_of = |rule_type: &str| -> serde_json::Value {
+            rules
+                .iter()
+                .find(|rule| rule["type"] == rule_type)
+                .unwrap_or_else(|| panic!("write body dropped the `{rule_type}` rule"))
+                .get("parameters")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        };
+
+        let pull_request = params_of("pull_request");
+        assert_eq!(
+            pull_request["required_approving_review_count"],
+            serde_json::json!(1),
+            "modeled parameter must round-trip",
+        );
+        assert_eq!(
+            pull_request["automatic_copilot_code_review_enabled"],
+            serde_json::json!(true),
+            "unmodeled parameter on a known rule type must survive GET-modify-PUT",
+        );
+
+        assert_eq!(
+            params_of("commit_message_pattern"),
+            serde_json::json!({ "operator": "starts_with", "pattern": "PROJ-" }),
+            "an unknown rule type's required parameters must survive verbatim, or the \
+             PUT 422s / silently resets them",
+        );
     }
 }

@@ -35,20 +35,22 @@ pub enum FixStatus {
     Failed { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `RulesetRule` carries an unmodeled-parameters `serde_json::Value` map (not `Eq`),
+// so these fix-plan types — which hold `Vec<RulesetRule>` — are `PartialEq`-only.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlannedFix {
     rule_id: RuleId,
     rule_name: String,
     plan: FixPlan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FixPlan {
     Effect(FixEffect),
     Rejected { reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FixEffect {
     SetRepositorySetting {
         repo: RepoRef,
