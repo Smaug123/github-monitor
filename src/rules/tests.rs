@@ -6,7 +6,7 @@ use super::glob::{branch_matches_filters, branch_pattern_matches};
 use super::workflows::is_commit_sha;
 use super::*;
 use crate::config::{RepoConfig, Visibility};
-use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
+use crate::facts::{Gathered, RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
     BranchProtection, BypassActor, BypassActorType, BypassMode, DefaultWorkflowPermissions,
     ForkPrApprovalPolicy, LegacyEnabledFlag, LegacyRequiredPullRequestReviews,
@@ -44,12 +44,14 @@ fn repo_ref_strategy() -> impl Strategy<Value = RepoRef> {
     (identifier(), identifier()).prop_map(|(owner, name)| RepoRef::new(owner, name))
 }
 
-fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Option<ForkPrApprovalPolicy>> {
+fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Gathered<ForkPrApprovalPolicy>> {
     prop_oneof![
-        Just(None),
-        Just(Some(ForkPrApprovalPolicy::AllExternalContributors)),
-        Just(Some(ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub)),
-        Just(Some(ForkPrApprovalPolicy::FirstTimeContributors)),
+        Just(Gathered::Absent),
+        Just(Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)),
+        Just(Gathered::Present(
+            ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub
+        )),
+        Just(Gathered::Present(ForkPrApprovalPolicy::FirstTimeContributors)),
     ]
 }
 
@@ -384,7 +386,10 @@ fn repo_facts_strategy() -> impl Strategy<Value = RepoFacts> {
         repo_ref_strategy(),
         repo_settings_strategy(),
         proptest::collection::vec(ruleset_strategy(), 0..4),
-        proptest::option::of(Just(BranchProtection::default())),
+        prop_oneof![
+            Just(Gathered::Absent),
+            Just(Gathered::Present(BranchProtection::default())),
+        ],
         identifier(),
         proptest::collection::vec(workflow_file_strategy(), 0..4),
         proptest::collection::btree_set(path_fragment(), 0..8),
@@ -553,7 +558,7 @@ fn empty_repo_settings() -> RepoSettings {
         allow_squash_merge: Some(false),
         allow_merge_commit: Some(false),
         allow_rebase_merge: Some(false),
-        fork_pr_approval_policy: None,
+        fork_pr_approval_policy: Gathered::Absent,
         default_workflow_permissions: DefaultWorkflowPermissions::Read,
     }
 }
@@ -563,7 +568,7 @@ fn base_facts() -> RepoFacts {
         repo: RepoRef::new("example", "repo"),
         settings: empty_repo_settings(),
         rulesets: Vec::new(),
-        legacy_branch_protection: None,
+        legacy_branch_protection: Gathered::Absent,
         default_branch: BranchName::new("main"),
         workflows: Vec::new(),
         files_present: BTreeSet::new(),
@@ -839,7 +844,7 @@ proptest! {
             repo,
             settings,
             rulesets: Vec::new(),
-            legacy_branch_protection: None,
+            legacy_branch_protection: Gathered::Absent,
             default_branch: BranchName::new(default_branch),
             workflows,
             files_present,
@@ -1227,7 +1232,7 @@ fn uses_rulesets_not_legacy_protection_passes_when_default_branch_has_no_legacy_
 #[test]
 fn uses_rulesets_not_legacy_protection_fails_when_legacy_protection_present() {
     let mut facts = base_facts();
-    facts.legacy_branch_protection = Some(BranchProtection::default());
+    facts.legacy_branch_protection = Gathered::Present(BranchProtection::default());
 
     assert!(matches!(
         evaluate(&RuleKind::UsesRulesetsNotLegacyProtection, &facts),

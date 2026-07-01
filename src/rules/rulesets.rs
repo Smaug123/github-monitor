@@ -86,7 +86,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
         }
         RuleKind::RulesetRequiresStrictStatusChecks => evaluate_strict_status_checks(facts),
         RuleKind::UsesRulesetsNotLegacyProtection => {
-            if facts.legacy_branch_protection.is_some() {
+            if facts.legacy_branch_protection.is_present() {
                 RuleResult::Fail {
                     reason: "legacy branch protection is configured on the default branch"
                         .to_owned(),

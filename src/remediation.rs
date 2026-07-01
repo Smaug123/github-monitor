@@ -1757,7 +1757,7 @@ fn plan_set_strict_required_status_checks(facts: &RepoFacts) -> FixPlan {
 }
 
 fn plan_delete_legacy_branch_protection(facts: &RepoFacts) -> FixPlan {
-    let Some(legacy) = facts.legacy_branch_protection.as_ref() else {
+    let Some(legacy) = facts.legacy_branch_protection.as_option() else {
         return FixPlan::Rejected {
             reason: "internal error: no legacy branch protection present despite RS007 failure"
                 .to_owned(),
@@ -2101,7 +2101,7 @@ fn summarize_examples(values: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::config::{RepoConfig, Visibility};
-    use crate::facts::{RepoSettings, WorkflowFile};
+    use crate::facts::{Gathered, RepoSettings, WorkflowFile};
     use crate::rules::{RepoSetting, Rule, SettingValue, rules_for_repo};
     use crate::workflow::model::{
         ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step, StepKind, Triggers,
@@ -2133,12 +2133,12 @@ mod tests {
                 allow_squash_merge: Some(false),
                 allow_merge_commit: Some(true),
                 allow_rebase_merge: Some(false),
-                fork_pr_approval_policy: None,
+                fork_pr_approval_policy: Gathered::Absent,
                 default_workflow_permissions:
                     crate::github::types::DefaultWorkflowPermissions::Read,
             },
             rulesets: Vec::new(),
-            legacy_branch_protection: None,
+            legacy_branch_protection: Gathered::Absent,
             default_branch: BranchName::new("main"),
             workflows: Vec::new(),
             files_present: BTreeSet::new(),
@@ -4413,7 +4413,7 @@ mod tests {
     #[test]
     fn delete_legacy_branch_protection_rejected_when_not_superseded() {
         let mut facts = base_facts();
-        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.legacy_branch_protection = Gathered::Present(linear_history_legacy());
         facts.rulesets = vec![ruleset_for_default_branch(1, "main protection", Vec::new())];
 
         let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
@@ -4437,7 +4437,7 @@ mod tests {
     #[test]
     fn delete_legacy_branch_protection_planned_when_superseded() {
         let mut facts = base_facts();
-        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.legacy_branch_protection = Gathered::Present(linear_history_legacy());
         facts.rulesets = vec![ruleset_for_default_branch(
             1,
             "main protection",
@@ -4466,7 +4466,7 @@ mod tests {
     #[test]
     fn execute_repo_fixes_deletes_legacy_branch_protection() {
         let mut facts = base_facts();
-        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.legacy_branch_protection = Gathered::Present(linear_history_legacy());
         facts.rulesets = vec![ruleset_for_default_branch(
             1,
             "main protection",
@@ -4500,7 +4500,7 @@ mod tests {
     #[test]
     fn execute_repo_fixes_reports_failure_when_delete_branch_protection_fails() {
         let mut facts = base_facts();
-        facts.legacy_branch_protection = Some(linear_history_legacy());
+        facts.legacy_branch_protection = Gathered::Present(linear_history_legacy());
         facts.rulesets = vec![ruleset_for_default_branch(
             1,
             "main protection",

@@ -13,6 +13,39 @@ use crate::github::types::{
 use crate::types::{BranchName, RepoRef};
 use crate::workflow::model::Workflow;
 
+/// A fact gathered from GitHub that may legitimately be absent, but whose presence
+/// in a snapshot is mandatory. Unlike a bare `Option<T>` — which serde silently
+/// reads as `None` when the field is missing from the JSON — a snapshot that omits
+/// a `Gathered` field fails to load. That keeps "gathered and verified absent"
+/// (`Absent`) distinct from "never recorded" (a load error), so a rule can never
+/// pass or fail vacuously on a value that was simply never captured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Gathered<T> {
+    Present(T),
+    Absent,
+}
+
+impl<T> Gathered<T> {
+    pub fn from_option(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::Present(value),
+            None => Self::Absent,
+        }
+    }
+
+    pub fn as_option(&self) -> Option<&T> {
+        match self {
+            Self::Present(value) => Some(value),
+            Self::Absent => None,
+        }
+    }
+
+    pub fn is_present(&self) -> bool {
+        matches!(self, Self::Present(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoSettings {
     pub private: bool,
@@ -28,8 +61,10 @@ pub struct RepoSettings {
     pub allow_squash_merge: Option<bool>,
     pub allow_merge_commit: Option<bool>,
     pub allow_rebase_merge: Option<bool>,
-    #[serde(default)]
-    pub fork_pr_approval_policy: Option<ForkPrApprovalPolicy>,
+    /// `Absent` means the fork-PR approval policy was gathered and found unset — a
+    /// known state (ST007 fails on it), distinct from a snapshot that never
+    /// recorded the field (which fails to load). See [`Gathered`].
+    pub fork_pr_approval_policy: Gathered<ForkPrApprovalPolicy>,
     pub default_workflow_permissions: DefaultWorkflowPermissions,
 }
 
@@ -49,7 +84,7 @@ impl RepoSettings {
             allow_squash_merge: repository.allow_squash_merge,
             allow_merge_commit: repository.allow_merge_commit,
             allow_rebase_merge: repository.allow_rebase_merge,
-            fork_pr_approval_policy,
+            fork_pr_approval_policy: Gathered::from_option(fork_pr_approval_policy),
             default_workflow_permissions,
         }
     }
@@ -74,8 +109,10 @@ pub struct RepoFacts {
     pub repo: RepoRef,
     pub settings: RepoSettings,
     pub rulesets: Vec<Ruleset>,
-    #[serde(default)]
-    pub legacy_branch_protection: Option<BranchProtection>,
+    /// `Absent` means branch protection was queried and found absent (the endpoint
+    /// 404s for an unprotected branch) — a known state RS007 passes on. A snapshot
+    /// that omits the field fails to load rather than masquerading as `Absent`.
+    pub legacy_branch_protection: Gathered<BranchProtection>,
     pub default_branch: BranchName,
     pub workflows: Vec<WorkflowFile>,
     pub files_present: BTreeSet<String>,
@@ -99,7 +136,8 @@ pub fn gather_repo_facts(
         default_workflow_permissions,
     );
     let rulesets = fetch_rulesets(client, &repo)?;
-    let legacy_branch_protection = client.get_branch_protection(&repo, &default_branch)?;
+    let legacy_branch_protection =
+        Gathered::from_option(client.get_branch_protection(&repo, &default_branch)?);
     let tree = client.get_git_tree(&repo, &default_branch.to_string())?;
 
     if tree.truncated {
@@ -428,13 +466,16 @@ mod tests {
         "[a-z][a-z0-9 _-]{0,20}"
     }
 
-    fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Option<ForkPrApprovalPolicy>> {
+    fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Gathered<ForkPrApprovalPolicy>> {
         prop_oneof![
-            Just(None),
-            Just(Some(ForkPrApprovalPolicy::AllExternalContributors)),
-            Just(Some(ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub)),
-            Just(Some(ForkPrApprovalPolicy::FirstTimeContributors)),
-            "[a-z][a-z0-9_]{0,16}".prop_map(|value| Some(ForkPrApprovalPolicy::Unknown(value))),
+            Just(Gathered::Absent),
+            Just(Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)),
+            Just(Gathered::Present(
+                ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub
+            )),
+            Just(Gathered::Present(ForkPrApprovalPolicy::FirstTimeContributors)),
+            "[a-z][a-z0-9_]{0,16}"
+                .prop_map(|value| Gathered::Present(ForkPrApprovalPolicy::Unknown(value))),
         ]
     }
 
@@ -786,7 +827,10 @@ mod tests {
             identifier(),
             repo_settings_strategy(),
             proptest::collection::vec(ruleset_strategy(), 0..3),
-            proptest::option::of(Just(BranchProtection::default())),
+            prop_oneof![
+                Just(Gathered::Absent),
+                Just(Gathered::Present(BranchProtection::default())),
+            ],
             identifier(),
             proptest::collection::vec(workflow_file_strategy(), 0..3),
             proptest::collection::btree_set("[./A-Za-z0-9_-]{1,40}", 0..10),
@@ -859,10 +903,12 @@ mod tests {
                 allow_squash_merge: Some(true),
                 allow_merge_commit: Some(false),
                 allow_rebase_merge: Some(false),
-                fork_pr_approval_policy: Some(ForkPrApprovalPolicy::AllExternalContributors),
+                fork_pr_approval_policy: Gathered::Present(
+                    ForkPrApprovalPolicy::AllExternalContributors,
+                ),
                 default_workflow_permissions: DefaultWorkflowPermissions::Read,
             },
-            legacy_branch_protection: None,
+            legacy_branch_protection: Gathered::Absent,
             rulesets: vec![Ruleset {
                 id: 1,
                 name: "main protection".to_owned(),
@@ -962,26 +1008,36 @@ mod tests {
         contrasting: fn() -> serde_json::Value,
     }
 
-    /// The `RepoFacts`-layer fields that currently carry `#[serde(default)]`, so a
-    /// snapshot missing them loads as `None` rather than failing. Each is a
-    /// candidate for either Mechanism B (drop the default -> absence fails to parse)
-    /// or Mechanism A (keep the option but make the reading rule return `Error`).
+    /// The `RepoFacts`-layer facts whose *presence in a snapshot* is mandatory.
+    /// Each is now a [`Gathered`] value, so removing its key makes the snapshot fail
+    /// to load (Mechanism B) — the invariant below relies on that `else continue`
+    /// branch rather than on any rule returning `Error`.
     fn holeable_facts() -> Vec<HoleableFact> {
         vec![
             HoleableFact {
                 name: "legacy_branch_protection",
                 path: &["legacy_branch_protection"],
-                present: || serde_json::to_value(BranchProtection::default()).unwrap(),
-                contrasting: || serde_json::Value::Null,
+                present: || {
+                    serde_json::to_value(Gathered::Present(BranchProtection::default())).unwrap()
+                },
+                contrasting: || {
+                    serde_json::to_value(Gathered::<BranchProtection>::Absent).unwrap()
+                },
             },
             HoleableFact {
                 name: "settings.fork_pr_approval_policy",
                 path: &["settings", "fork_pr_approval_policy"],
                 present: || {
-                    serde_json::to_value(ForkPrApprovalPolicy::AllExternalContributors).unwrap()
+                    serde_json::to_value(Gathered::Present(
+                        ForkPrApprovalPolicy::AllExternalContributors,
+                    ))
+                    .unwrap()
                 },
                 contrasting: || {
-                    serde_json::to_value(ForkPrApprovalPolicy::FirstTimeContributors).unwrap()
+                    serde_json::to_value(Gathered::Present(
+                        ForkPrApprovalPolicy::FirstTimeContributors,
+                    ))
+                    .unwrap()
                 },
             },
         ]
@@ -1022,9 +1078,10 @@ mod tests {
         /// fails to load (absence is unrepresentable) or every rule reading the
         /// now-unknown fact returns `Error` — never `Pass`/`Fail`/`Skip`.
         ///
-        /// RED today: `legacy_branch_protection` and `fork_pr_approval_policy` both
-        /// carry `#[serde(default)]`, so a snapshot missing them loads as `None` and
-        /// RS007/ST007 return a definite `Pass`/`Fail` from an unknown.
+        /// The snapshot-layer facts in `holeable_facts` are [`Gathered`], so removing
+        /// a key makes the snapshot fail to load; privilege-gated API booleans
+        /// instead surface as `Error` (see finding 4). Either way, no rule reads a
+        /// hole and passes.
         #[test]
         fn absent_security_fact_never_yields_a_definite_verdict(
             facts in repo_facts_strategy(),
@@ -1090,6 +1147,36 @@ mod tests {
         assert_eq!(saved_path, snapshot_path(&snapshot_dir, &facts.repo));
 
         fs::remove_dir_all(snapshot_dir).unwrap();
+    }
+
+    /// The Mechanism-B guarantee, stated directly: a `Gathered` fact whose key is
+    /// omitted from a snapshot must fail to load, rather than silently defaulting
+    /// to `Absent` the way a bare `Option` would. Guards against anyone reverting
+    /// these fields to `Option` or re-adding `#[serde(default)]`.
+    #[test]
+    fn snapshot_omitting_a_gathered_fact_fails_to_load() {
+        let base = serde_json::to_value(sample_repo_facts()).unwrap();
+
+        let mut without_legacy = base.clone();
+        without_legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("legacy_branch_protection");
+        assert!(
+            serde_json::from_value::<RepoFacts>(without_legacy).is_err(),
+            "a snapshot omitting `legacy_branch_protection` must fail to load, not default to Absent",
+        );
+
+        let mut without_fork = base;
+        without_fork
+            .pointer_mut("/settings")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("fork_pr_approval_policy");
+        assert!(
+            serde_json::from_value::<RepoFacts>(without_fork).is_err(),
+            "a snapshot omitting `settings.fork_pr_approval_policy` must fail to load",
+        );
     }
 
     #[test]

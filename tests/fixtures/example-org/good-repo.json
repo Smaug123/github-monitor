@@ -13,7 +13,9 @@
     "allow_squash_merge": true,
     "allow_merge_commit": false,
     "allow_rebase_merge": false,
-    "fork_pr_approval_policy": "all_external_contributors",
+    "fork_pr_approval_policy": {
+      "present": "all_external_contributors"
+    },
     "default_workflow_permissions": "read"
   },
   "rulesets": [
@@ -69,7 +71,7 @@
     }
   ],
   "default_branch": "main",
-  "legacy_branch_protection": null,
+  "legacy_branch_protection": "absent",
   "workflows": [
     {
       "path": ".github/workflows/ci.yml",

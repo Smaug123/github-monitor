@@ -69,9 +69,9 @@ impl RepoSetting {
             Self::AllowRebaseMerge => {
                 SettingValue::from_optional_bool(settings.allow_rebase_merge)
             }
-            Self::ForkPrApprovalPolicy => {
-                SettingValue::ForkPrApprovalPolicy(settings.fork_pr_approval_policy.clone())
-            }
+            Self::ForkPrApprovalPolicy => SettingValue::ForkPrApprovalPolicy(
+                settings.fork_pr_approval_policy.as_option().cloned(),
+            ),
             Self::DefaultWorkflowPermissions => SettingValue::DefaultWorkflowPermissions(
                 settings.default_workflow_permissions.clone(),
             ),
