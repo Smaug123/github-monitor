@@ -13,19 +13,58 @@ use crate::github::types::{
 use crate::types::{BranchName, RepoRef};
 use crate::workflow::model::Workflow;
 
+/// A fact gathered from GitHub that may legitimately be absent, but whose presence
+/// in a snapshot is mandatory. Unlike a bare `Option<T>` — which serde silently
+/// reads as `None` when the field is missing from the JSON — a snapshot that omits
+/// a `Gathered` field fails to load. That keeps "gathered and verified absent"
+/// (`Absent`) distinct from "never recorded" (a load error), so a rule can never
+/// pass or fail vacuously on a value that was simply never captured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Gathered<T> {
+    Present(T),
+    Absent,
+}
+
+impl<T> Gathered<T> {
+    pub fn from_option(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::Present(value),
+            None => Self::Absent,
+        }
+    }
+
+    pub fn as_option(&self) -> Option<&T> {
+        match self {
+            Self::Present(value) => Some(value),
+            Self::Absent => None,
+        }
+    }
+
+    pub fn is_present(&self) -> bool {
+        matches!(self, Self::Present(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoSettings {
     pub private: bool,
     pub archived: bool,
     pub disabled: bool,
-    pub allow_auto_merge: bool,
-    pub delete_branch_on_merge: bool,
-    pub allow_update_branch: bool,
-    pub allow_squash_merge: bool,
-    pub allow_merge_commit: bool,
-    pub allow_rebase_merge: bool,
-    #[serde(default)]
-    pub fork_pr_approval_policy: Option<ForkPrApprovalPolicy>,
+    /// Merge-policy flags are `None` when GitHub did not report them (the token
+    /// lacks permission to read them). Rules treat an unknown flag as `Error`,
+    /// never a vacuous pass. A snapshot storing an explicit `true`/`false` loads
+    /// as `Some(_)`, so existing snapshots remain valid.
+    pub allow_auto_merge: Option<bool>,
+    pub delete_branch_on_merge: Option<bool>,
+    pub allow_update_branch: Option<bool>,
+    pub allow_squash_merge: Option<bool>,
+    pub allow_merge_commit: Option<bool>,
+    pub allow_rebase_merge: Option<bool>,
+    /// `Absent` means the fork-PR approval policy was gathered and found unset — a
+    /// known state (ST007 fails on it), distinct from a snapshot that never
+    /// recorded the field (which fails to load). See [`Gathered`].
+    pub fork_pr_approval_policy: Gathered<ForkPrApprovalPolicy>,
     pub default_workflow_permissions: DefaultWorkflowPermissions,
 }
 
@@ -45,7 +84,7 @@ impl RepoSettings {
             allow_squash_merge: repository.allow_squash_merge,
             allow_merge_commit: repository.allow_merge_commit,
             allow_rebase_merge: repository.allow_rebase_merge,
-            fork_pr_approval_policy,
+            fork_pr_approval_policy: Gathered::from_option(fork_pr_approval_policy),
             default_workflow_permissions,
         }
     }
@@ -70,8 +109,10 @@ pub struct RepoFacts {
     pub repo: RepoRef,
     pub settings: RepoSettings,
     pub rulesets: Vec<Ruleset>,
-    #[serde(default)]
-    pub legacy_branch_protection: Option<BranchProtection>,
+    /// `Absent` means branch protection was queried and found absent (the endpoint
+    /// 404s for an unprotected branch) — a known state RS007 passes on. A snapshot
+    /// that omits the field fails to load rather than masquerading as `Absent`.
+    pub legacy_branch_protection: Gathered<BranchProtection>,
     pub default_branch: BranchName,
     pub workflows: Vec<WorkflowFile>,
     pub files_present: BTreeSet<String>,
@@ -95,7 +136,8 @@ pub fn gather_repo_facts(
         default_workflow_permissions,
     );
     let rulesets = fetch_rulesets(client, &repo)?;
-    let legacy_branch_protection = client.get_branch_protection(&repo, &default_branch)?;
+    let legacy_branch_protection =
+        Gathered::from_option(client.get_branch_protection(&repo, &default_branch)?);
     let tree = client.get_git_tree(&repo, &default_branch.to_string())?;
 
     if tree.truncated {
@@ -424,13 +466,16 @@ mod tests {
         "[a-z][a-z0-9 _-]{0,20}"
     }
 
-    fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Option<ForkPrApprovalPolicy>> {
+    fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Gathered<ForkPrApprovalPolicy>> {
         prop_oneof![
-            Just(None),
-            Just(Some(ForkPrApprovalPolicy::AllExternalContributors)),
-            Just(Some(ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub)),
-            Just(Some(ForkPrApprovalPolicy::FirstTimeContributors)),
-            "[a-z][a-z0-9_]{0,16}".prop_map(|value| Some(ForkPrApprovalPolicy::Unknown(value))),
+            Just(Gathered::Absent),
+            Just(Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)),
+            Just(Gathered::Present(
+                ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub
+            )),
+            Just(Gathered::Present(ForkPrApprovalPolicy::FirstTimeContributors)),
+            "[a-z][a-z0-9_]{0,16}"
+                .prop_map(|value| Gathered::Present(ForkPrApprovalPolicy::Unknown(value))),
         ]
     }
 
@@ -448,12 +493,12 @@ mod tests {
             any::<bool>(),
             any::<bool>(),
             any::<bool>(),
-            any::<bool>(),
-            any::<bool>(),
-            any::<bool>(),
-            any::<bool>(),
-            any::<bool>(),
-            any::<bool>(),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
             fork_pr_approval_policy_strategy(),
             default_workflow_permissions_strategy(),
         )
@@ -782,7 +827,10 @@ mod tests {
             identifier(),
             repo_settings_strategy(),
             proptest::collection::vec(ruleset_strategy(), 0..3),
-            proptest::option::of(Just(BranchProtection::default())),
+            prop_oneof![
+                Just(Gathered::Absent),
+                Just(Gathered::Present(BranchProtection::default())),
+            ],
             identifier(),
             proptest::collection::vec(workflow_file_strategy(), 0..3),
             proptest::collection::btree_set("[./A-Za-z0-9_-]{1,40}", 0..10),
@@ -849,16 +897,18 @@ mod tests {
                 private: false,
                 archived: false,
                 disabled: false,
-                allow_auto_merge: true,
-                delete_branch_on_merge: true,
-                allow_update_branch: true,
-                allow_squash_merge: true,
-                allow_merge_commit: false,
-                allow_rebase_merge: false,
-                fork_pr_approval_policy: Some(ForkPrApprovalPolicy::AllExternalContributors),
+                allow_auto_merge: Some(true),
+                delete_branch_on_merge: Some(true),
+                allow_update_branch: Some(true),
+                allow_squash_merge: Some(true),
+                allow_merge_commit: Some(false),
+                allow_rebase_merge: Some(false),
+                fork_pr_approval_policy: Gathered::Present(
+                    ForkPrApprovalPolicy::AllExternalContributors,
+                ),
                 default_workflow_permissions: DefaultWorkflowPermissions::Read,
             },
-            legacy_branch_protection: None,
+            legacy_branch_protection: Gathered::Absent,
             rulesets: vec![Ruleset {
                 id: 1,
                 name: "main protection".to_owned(),
@@ -946,6 +996,145 @@ mod tests {
         }
     }
 
+    /// A security-relevant fact whose *absence* from a snapshot the invariant below
+    /// probes. `present`/`contrasting` are two concrete JSON values for the field;
+    /// the fact that some rule's verdict differs between them is what proves the
+    /// rule *observes* the field, so no hand-maintained rule->field map is needed.
+    struct HoleableFact {
+        name: &'static str,
+        /// Object-key path to the field inside a serialized `RepoFacts`.
+        path: &'static [&'static str],
+        present: fn() -> serde_json::Value,
+        contrasting: fn() -> serde_json::Value,
+    }
+
+    /// The `RepoFacts`-layer facts whose *presence in a snapshot* is mandatory.
+    /// Each is now a [`Gathered`] value, so removing its key makes the snapshot fail
+    /// to load (Mechanism B) — the invariant below relies on that `else continue`
+    /// branch rather than on any rule returning `Error`.
+    fn holeable_facts() -> Vec<HoleableFact> {
+        vec![
+            HoleableFact {
+                name: "legacy_branch_protection",
+                path: &["legacy_branch_protection"],
+                present: || {
+                    serde_json::to_value(Gathered::Present(BranchProtection::default())).unwrap()
+                },
+                contrasting: || {
+                    serde_json::to_value(Gathered::<BranchProtection>::Absent).unwrap()
+                },
+            },
+            HoleableFact {
+                name: "settings.fork_pr_approval_policy",
+                path: &["settings", "fork_pr_approval_policy"],
+                present: || {
+                    serde_json::to_value(Gathered::Present(
+                        ForkPrApprovalPolicy::AllExternalContributors,
+                    ))
+                    .unwrap()
+                },
+                contrasting: || {
+                    serde_json::to_value(Gathered::Present(
+                        ForkPrApprovalPolicy::FirstTimeContributors,
+                    ))
+                    .unwrap()
+                },
+            },
+        ]
+    }
+
+    fn parent_object<'a>(
+        root: &'a mut serde_json::Value,
+        path: &[&str],
+    ) -> &'a mut serde_json::Map<String, serde_json::Value> {
+        let mut node = root;
+        for key in &path[..path.len() - 1] {
+            node = node
+                .get_mut(*key)
+                .expect("intermediate path element must exist");
+        }
+        node.as_object_mut().expect("parent of field must be an object")
+    }
+
+    fn set_field(
+        mut root: serde_json::Value,
+        path: &[&str],
+        value: serde_json::Value,
+    ) -> serde_json::Value {
+        let last = *path.last().expect("path must be non-empty");
+        parent_object(&mut root, path).insert(last.to_owned(), value);
+        root
+    }
+
+    fn remove_field(mut root: serde_json::Value, path: &[&str]) -> serde_json::Value {
+        let last = *path.last().expect("path must be non-empty");
+        parent_object(&mut root, path).remove(last);
+        root
+    }
+
+    proptest! {
+        /// P2: an *absent* (unknown) security-relevant fact must never produce a
+        /// definite verdict. For a fact that some rule observes, either the snapshot
+        /// fails to load (absence is unrepresentable) or every rule reading the
+        /// now-unknown fact returns `Error` — never `Pass`/`Fail`/`Skip`.
+        ///
+        /// The snapshot-layer facts in `holeable_facts` are [`Gathered`], so removing
+        /// a key makes the snapshot fail to load; privilege-gated API booleans
+        /// instead surface as `Error` (see finding 4). Either way, no rule reads a
+        /// hole and passes.
+        #[test]
+        fn absent_security_fact_never_yields_a_definite_verdict(
+            facts in repo_facts_strategy(),
+        ) {
+            use crate::rules::{default_rules, evaluate_rules, RuleResult};
+
+            let rules = default_rules();
+            let base = serde_json::to_value(&facts).expect("facts serialize");
+
+            for field in holeable_facts() {
+                let present_json = set_field(base.clone(), field.path, (field.present)());
+                let contrasting_json = set_field(base.clone(), field.path, (field.contrasting)());
+
+                let present_facts: RepoFacts = serde_json::from_value(present_json.clone())
+                    .expect("present value must deserialize");
+                let contrasting_facts: RepoFacts = serde_json::from_value(contrasting_json)
+                    .expect("contrasting value must deserialize");
+
+                let present_out = evaluate_rules(&rules, &present_facts);
+                let contrasting_out = evaluate_rules(&rules, &contrasting_facts);
+
+                // Rules that observe this field: their verdict moves when it does.
+                let observing: Vec<usize> = (0..rules.len())
+                    .filter(|&i| present_out[i].result != contrasting_out[i].result)
+                    .collect();
+                if observing.is_empty() {
+                    // Not observable in this sample; nothing to prove for this field.
+                    continue;
+                }
+
+                // Make the field unknown by dropping it from the snapshot entirely.
+                let holed_json = remove_field(present_json, field.path);
+                let Ok(holed_facts) = serde_json::from_value::<RepoFacts>(holed_json) else {
+                    // Absence is unrepresentable: the snapshot fails to load. OK.
+                    continue;
+                };
+
+                let holed_out = evaluate_rules(&rules, &holed_facts);
+                for i in observing {
+                    prop_assert!(
+                        matches!(holed_out[i].result, RuleResult::Error { .. }),
+                        "field `{}` was absent from the snapshot, but rule `{}` returned \
+                         {:?}; a rule that reads an unknown fact must return Error, never a \
+                         definite verdict",
+                        field.name,
+                        holed_out[i].id,
+                        holed_out[i].result,
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn snapshot_save_then_load_preserves_facts() {
         let snapshot_dir = unique_temp_dir();
@@ -958,6 +1147,36 @@ mod tests {
         assert_eq!(saved_path, snapshot_path(&snapshot_dir, &facts.repo));
 
         fs::remove_dir_all(snapshot_dir).unwrap();
+    }
+
+    /// The Mechanism-B guarantee, stated directly: a `Gathered` fact whose key is
+    /// omitted from a snapshot must fail to load, rather than silently defaulting
+    /// to `Absent` the way a bare `Option` would. Guards against anyone reverting
+    /// these fields to `Option` or re-adding `#[serde(default)]`.
+    #[test]
+    fn snapshot_omitting_a_gathered_fact_fails_to_load() {
+        let base = serde_json::to_value(sample_repo_facts()).unwrap();
+
+        let mut without_legacy = base.clone();
+        without_legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("legacy_branch_protection");
+        assert!(
+            serde_json::from_value::<RepoFacts>(without_legacy).is_err(),
+            "a snapshot omitting `legacy_branch_protection` must fail to load, not default to Absent",
+        );
+
+        let mut without_fork = base;
+        without_fork
+            .pointer_mut("/settings")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("fork_pr_approval_policy");
+        assert!(
+            serde_json::from_value::<RepoFacts>(without_fork).is_err(),
+            "a snapshot omitting `settings.fork_pr_approval_policy` must fail to load",
+        );
     }
 
     #[test]

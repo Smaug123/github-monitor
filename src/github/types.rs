@@ -58,24 +58,23 @@ macro_rules! string_enum {
 pub struct Repository {
     pub name: RepoName,
     pub default_branch: BranchName,
-    #[serde(default)]
+    // `private`/`archived`/`disabled` are returned by `GET /repos` for every
+    // caller, so they are required: a missing one is a malformed response, not a
+    // silent `false`.
     pub private: bool,
-    #[serde(default)]
     pub archived: bool,
-    #[serde(default)]
     pub disabled: bool,
-    #[serde(default)]
-    pub allow_auto_merge: bool,
-    #[serde(default)]
-    pub delete_branch_on_merge: bool,
-    #[serde(default)]
-    pub allow_update_branch: bool,
-    #[serde(default)]
-    pub allow_squash_merge: bool,
-    #[serde(default)]
-    pub allow_merge_commit: bool,
-    #[serde(default)]
-    pub allow_rebase_merge: bool,
+    // GitHub omits the merge-policy booleans from `GET /repos` when the caller
+    // lacks permission to read them (e.g. a mis-scoped token). `None` therefore
+    // means "not reported by the API" — an unknown, distinct from a definite
+    // `false`. Serde maps a missing `Option` field to `None`, which is exactly
+    // the unknown we want to preserve for the rules to turn into `Error`.
+    pub allow_auto_merge: Option<bool>,
+    pub delete_branch_on_merge: Option<bool>,
+    pub allow_update_branch: Option<bool>,
+    pub allow_squash_merge: Option<bool>,
+    pub allow_merge_commit: Option<bool>,
+    pub allow_rebase_merge: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -555,6 +554,69 @@ pub struct WorkflowPermissions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Finding 4: a `Repository` boolean that is *absent* from the API response must
+    /// not silently become `false`. Under a mis-scoped token GitHub omits the
+    /// merge-policy and visibility booleans entirely; `#[serde(default)]` currently
+    /// turns each absence into a definite `false`, so e.g. ST004 ("merge commits
+    /// disabled") passes vacuously. Absence must be *distinguishable* from an
+    /// explicit `false`, whether the fix makes the field required (absence => parse
+    /// error) or `Option<bool>` (absence => `None`).
+    ///
+    /// RED today: both deserialize to the same `false`.
+    #[test]
+    fn absent_repository_boolean_is_distinguishable_from_explicit_false() {
+        let boolean_fields = [
+            "private",
+            "archived",
+            "disabled",
+            "allow_auto_merge",
+            "delete_branch_on_merge",
+            "allow_update_branch",
+            "allow_squash_merge",
+            "allow_merge_commit",
+            "allow_rebase_merge",
+        ];
+
+        for field in boolean_fields {
+            let mut with_false = serde_json::json!({
+                "name": "repo",
+                "default_branch": "main",
+                "private": true,
+                "archived": true,
+                "disabled": true,
+                "allow_auto_merge": true,
+                "delete_branch_on_merge": true,
+                "allow_update_branch": true,
+                "allow_squash_merge": true,
+                "allow_merge_commit": true,
+                "allow_rebase_merge": true,
+            });
+            // Field under test present-and-`false`; every other field stays `true`.
+            with_false[field] = serde_json::Value::Bool(false);
+
+            let mut without = with_false.clone();
+            without
+                .as_object_mut()
+                .expect("object")
+                .remove(field);
+
+            let explicit_false = serde_json::from_value::<Repository>(with_false);
+            let absent = serde_json::from_value::<Repository>(without);
+
+            // If either side fails to parse, absence is already distinguishable from
+            // an explicit `false`, so the invariant holds. It's the both-`Ok`,
+            // both-equal case that is the coercion bug.
+            if let (Ok(explicit_false), Ok(absent)) = (explicit_false, absent) {
+                assert_ne!(
+                    explicit_false, absent,
+                    "`Repository` field `{field}` deserialized identically whether \
+                     present-and-false or absent; a missing (privilege-gated) field is \
+                     being coerced to `false`",
+                );
+            }
+        }
+    }
 
     #[test]
     fn deserializes_ruleset_payload() {

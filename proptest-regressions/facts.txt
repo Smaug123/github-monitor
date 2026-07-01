@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6d8b8398fd63f9804414a1ac5e170ebe87078ae2b2a92490724c3cf71f0fa950 # shrinks to facts = RepoFacts { repo: RepoRef { owner: Owner("a"), name: RepoName("a") }, settings: RepoSettings { private: false, archived: false, disabled: false, allow_auto_merge: false, delete_branch_on_merge: false, allow_update_branch: false, allow_squash_merge: false, allow_merge_commit: false, allow_rebase_merge: false, fork_pr_approval_policy: None, default_workflow_permissions: Read }, rulesets: [], legacy_branch_protection: None, default_branch: BranchName("a"), workflows: [], files_present: {} }
