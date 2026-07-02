@@ -2295,6 +2295,38 @@ mod tests {
     }
 
     #[test]
+    fn plan_repo_fixes_skips_disabled_rules() {
+        // Disabling a rule must remove it from the fix plan too — otherwise
+        // `--fix` would mutate the repo for a rule the user believes is off.
+        let facts = bad_fixture();
+        let enabled = plan_repo_fixes(
+            &rules_for_repo(&RepoConfig {
+                owner: "example-org".to_owned(),
+                name: "bad-repo".to_owned(),
+                visibility: Visibility::Private,
+                disabled_rules: None,
+            }),
+            &facts,
+        );
+        assert!(
+            enabled.iter().any(|fix| fix.rule_id.to_string() == "ST001"),
+            "ST001 should be planned when enabled (guards the test below)"
+        );
+
+        let config = RepoConfig {
+            owner: "example-org".to_owned(),
+            name: "bad-repo".to_owned(),
+            visibility: Visibility::Private,
+            disabled_rules: Some(vec!["ST001".to_owned()]),
+        };
+        let fixes = plan_repo_fixes(&rules_for_repo(&config), &facts);
+        assert!(
+            fixes.iter().all(|fix| fix.rule_id.to_string() != "ST001"),
+            "ST001 fix must not be planned when the rule is disabled"
+        );
+    }
+
+    #[test]
     fn bad_fixture_plans_effects_and_rejections_for_failed_rules() {
         let facts = bad_fixture();
         let config = RepoConfig {

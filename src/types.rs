@@ -92,6 +92,10 @@ impl RuleId {
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Display for RuleId {

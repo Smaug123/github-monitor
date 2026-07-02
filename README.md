@@ -85,7 +85,7 @@ visibility = "private"
 
 `visibility` is `"public"` or `"private"`, and defaults to `"public"` when omitted. Capitalisation or any other string is rejected at parse time.
 
-The parser also accepts an optional `disabled_rules` field:
+The config also accepts an optional `disabled_rules` field listing rule IDs to skip for that repo:
 
 ```toml
 [[repos]]
@@ -94,7 +94,7 @@ name = "example-repo"
 disabled_rules = ["NX002"]
 ```
 
-`disabled_rules` is reserved for future use. It is parsed today, but the current evaluator does not apply it yet.
+Disabled rules are excluded from both the audit and `--fix` planning for that repo. Every listed ID must name a real rule (including the per-repo `ST009`); an unknown ID is rejected at startup so a typo can't silently fail to disable a rule.
 
 ## Output
 
@@ -273,8 +273,7 @@ The default rule set is currently fixed in code.
 
 ## Current Limitations
 
-- The rule set is hard-coded. There is no CLI flag for selecting a custom subset of rules.
-- `disabled_rules` is parsed from config but not enforced yet.
+- The rule set is hard-coded. There is no CLI flag for selecting a custom subset of rules, though per-repo `disabled_rules` can turn individual rules off.
 - `RS007` may return `SKIP` because the current fact model does not record legacy branch protection state.
 - `NX002` may return `SKIP` because the current fact model does not capture full flake outputs.
 

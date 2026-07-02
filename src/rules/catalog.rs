@@ -207,7 +207,10 @@ pub fn default_rules() -> Vec<Rule> {
     ]
 }
 
-pub fn rules_for_repo(repo: &RepoConfig) -> Vec<Rule> {
+/// Every rule that *could* apply to a repo before `disabled_rules` filtering:
+/// the default set plus the per-repo `ST009`. This is the authoritative set of
+/// valid IDs a `disabled_rules` entry may name.
+fn candidate_rules_for_repo(repo: &RepoConfig) -> Vec<Rule> {
     let mut rules = default_rules();
     let expect_private = matches!(repo.visibility, Visibility::Private);
     rules.push(Rule::new(
@@ -219,4 +222,35 @@ pub fn rules_for_repo(repo: &RepoConfig) -> Vec<Rule> {
         }),
     ));
     rules
+}
+
+/// The rules to evaluate (and, in `--fix` mode, remediate) for `repo`, with any
+/// `disabled_rules` entries removed. Unknown IDs are ignored here — they are
+/// rejected up front by [`unknown_disabled_rule_ids`], so by the time this runs
+/// every listed ID is known.
+pub fn rules_for_repo(repo: &RepoConfig) -> Vec<Rule> {
+    let mut rules = candidate_rules_for_repo(repo);
+    if let Some(disabled) = &repo.disabled_rules {
+        rules.retain(|rule| !disabled.iter().any(|id| id == rule.id.as_str()));
+    }
+    rules
+}
+
+/// Rule IDs listed in `disabled_rules` that no rule in this repo's candidate set
+/// defines — a typo or a stale ID. Returned in the order they appear in the
+/// config so the caller can report them verbatim. Validated up front so `--fix`
+/// never plans work for a rule the user believes is disabled and a typo is never
+/// silently ignored.
+pub fn unknown_disabled_rule_ids(repo: &RepoConfig) -> Vec<String> {
+    let Some(disabled) = &repo.disabled_rules else {
+        return Vec::new();
+    };
+    let candidates = candidate_rules_for_repo(repo);
+    let known: std::collections::BTreeSet<&str> =
+        candidates.iter().map(|rule| rule.id.as_str()).collect();
+    disabled
+        .iter()
+        .filter(|id| !known.contains(id.as_str()))
+        .cloned()
+        .collect()
 }

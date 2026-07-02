@@ -10,7 +10,7 @@ mod workflows;
 
 #[cfg(test)]
 pub use self::catalog::default_rules;
-pub use self::catalog::rules_for_repo;
+pub use self::catalog::{rules_for_repo, unknown_disabled_rule_ids};
 pub use self::files::FileCheck;
 pub use self::rulesets::RulesetCheck;
 pub(crate) use self::rulesets::{
