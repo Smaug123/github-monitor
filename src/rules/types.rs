@@ -2,9 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::facts::{RepoFacts, RepoSettings};
 use crate::github::types::{
-    DefaultWorkflowPermissions, ForkPrApprovalPolicy, GITHUB_ACTIONS_INTEGRATION_ID, MergeMethod,
+    DefaultWorkflowPermissions, ForkPrApprovalPolicy, GITHUB_ACTIONS_INTEGRATION_ID,
 };
 use crate::types::{Gathered, RuleId};
+
+use super::files::FileCheck;
+use super::rulesets::RulesetCheck;
+use super::settings::SettingCheck;
+use super::workflows::WorkflowCheck;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepoSetting {
@@ -155,48 +160,17 @@ impl RequiredCheckSource {
     }
 }
 
+/// A rule to evaluate against a repository's facts. Each variant wraps a
+/// per-domain sub-enum whose module owns the matching `evaluate`; the wrapper's
+/// job is only to route to the right module. Adding a variant to a sub-enum is a
+/// compile error in that module's `evaluate` until it is handled, so no domain
+/// can silently drop a rule (the pre-split `_ => unreachable!()` arms could).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RuleKind {
-    RulesetExists,
-    RulesetRequiresStatusCheck {
-        check_name: String,
-        source: RequiredCheckSource,
-    },
-    RulesetEnforcesAdmins,
-    RulesetRequiresLinearHistory,
-    RulesetPreventsForcePush,
-    RulesetRestrictsDeletions,
-    RulesetRequiresSignedCommits,
-    RulesetRequiresPullRequest,
-    RulesetRestrictsMergeMethods {
-        allowed: Vec<MergeMethod>,
-    },
-    RulesetRequiresStrictStatusChecks,
-    UsesRulesetsNotLegacyProtection,
-    WorkflowExistsForDefaultBranch,
-    WorkflowHasJob {
-        job_name: String,
-    },
-    WorkflowActionsPinnedToSha,
-    NoPullRequestTargetWithCheckout,
-    NoWorkflowRunTrigger,
-    NoPullRequestSecretReferences,
-    WorkflowUsesAction {
-        action: String,
-    },
-    WorkflowHasRequiredChecksComplete,
-    FileExists {
-        path: String,
-    },
-    NixFlakeExists,
-    NixFlakeHasCheck,
-    RepoSettingMatch {
-        setting: RepoSetting,
-        expected: SettingValue,
-    },
-    DefaultBranchNameIs {
-        name: String,
-    },
+    Ruleset(RulesetCheck),
+    Workflow(WorkflowCheck),
+    File(FileCheck),
+    Setting(SettingCheck),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

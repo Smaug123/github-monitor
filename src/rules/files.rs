@@ -1,10 +1,19 @@
+use serde::{Deserialize, Serialize};
+
 use crate::facts::RepoFacts;
 
-use super::{RuleKind, RuleResult};
+use super::RuleResult;
 
-pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
-    match kind {
-        RuleKind::FileExists { path } => {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileCheck {
+    FileExists { path: String },
+    NixFlakeExists,
+    NixFlakeHasCheck,
+}
+
+pub(super) fn evaluate(rule: &FileCheck, facts: &RepoFacts) -> RuleResult {
+    match rule {
+        FileCheck::FileExists { path } => {
             if facts.files_present.contains(path) {
                 RuleResult::Pass
             } else {
@@ -13,7 +22,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::NixFlakeExists => {
+        FileCheck::NixFlakeExists => {
             if facts.files_present.contains("flake.nix") {
                 RuleResult::Pass
             } else {
@@ -22,7 +31,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::NixFlakeHasCheck => {
+        FileCheck::NixFlakeHasCheck => {
             if !facts.files_present.contains("flake.nix") {
                 RuleResult::Fail {
                     reason: "cannot observe flake checks because `flake.nix` is missing".to_owned(),
@@ -35,7 +44,6 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        _ => unreachable!("non-file rule passed to files::evaluate"),
     }
 }
 

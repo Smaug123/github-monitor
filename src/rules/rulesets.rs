@@ -7,12 +7,34 @@ use crate::github::types::{
     RulesetConditions, RulesetEnforcement, RulesetRuleType, RulesetTarget,
 };
 
-use super::glob::branch_pattern_matches;
-use super::{RequiredCheckSource, RuleKind, RuleResult};
+use serde::{Deserialize, Serialize};
 
-pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
-    match kind {
-        RuleKind::RulesetExists => {
+use super::glob::branch_pattern_matches;
+use super::{RequiredCheckSource, RuleResult};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RulesetCheck {
+    RulesetExists,
+    RulesetRequiresStatusCheck {
+        check_name: String,
+        source: RequiredCheckSource,
+    },
+    RulesetEnforcesAdmins,
+    RulesetRequiresLinearHistory,
+    RulesetPreventsForcePush,
+    RulesetRestrictsDeletions,
+    RulesetRequiresSignedCommits,
+    RulesetRequiresPullRequest,
+    RulesetRestrictsMergeMethods {
+        allowed: Vec<MergeMethod>,
+    },
+    RulesetRequiresStrictStatusChecks,
+    UsesRulesetsNotLegacyProtection,
+}
+
+pub(super) fn evaluate(rule: &RulesetCheck, facts: &RepoFacts) -> RuleResult {
+    match rule {
+        RulesetCheck::RulesetExists => {
             if has_active_branch_ruleset_for_default_branch(facts) {
                 RuleResult::Pass
             } else {
@@ -21,7 +43,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::RulesetRequiresStatusCheck { check_name, source } => {
+        RulesetCheck::RulesetRequiresStatusCheck { check_name, source } => {
             if !has_active_branch_ruleset_for_default_branch(facts) {
                 return RuleResult::Fail {
                     reason: "no active branch ruleset was found".to_owned(),
@@ -45,7 +67,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::RulesetEnforcesAdmins => {
+        RulesetCheck::RulesetEnforcesAdmins => {
             if !has_active_branch_ruleset_for_default_branch(facts) {
                 return RuleResult::Fail {
                     reason: "no active branch ruleset was found".to_owned(),
@@ -63,30 +85,30 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 RuleResult::Pass
             }
         }
-        RuleKind::RulesetRequiresLinearHistory => ruleset_rule_presence_result(
+        RulesetCheck::RulesetRequiresLinearHistory => ruleset_rule_presence_result(
             facts,
             RulesetRuleType::RequiredLinearHistory,
             "required_linear_history",
         ),
-        RuleKind::RulesetPreventsForcePush => {
+        RulesetCheck::RulesetPreventsForcePush => {
             ruleset_rule_presence_result(facts, RulesetRuleType::NonFastForward, "non_fast_forward")
         }
-        RuleKind::RulesetRestrictsDeletions => {
+        RulesetCheck::RulesetRestrictsDeletions => {
             ruleset_rule_presence_result(facts, RulesetRuleType::Deletion, "deletion")
         }
-        RuleKind::RulesetRequiresSignedCommits => ruleset_rule_presence_result(
+        RulesetCheck::RulesetRequiresSignedCommits => ruleset_rule_presence_result(
             facts,
             RulesetRuleType::RequiredSignatures,
             "required_signatures",
         ),
-        RuleKind::RulesetRequiresPullRequest => {
+        RulesetCheck::RulesetRequiresPullRequest => {
             ruleset_rule_presence_result(facts, RulesetRuleType::PullRequest, "pull_request")
         }
-        RuleKind::RulesetRestrictsMergeMethods { allowed } => {
+        RulesetCheck::RulesetRestrictsMergeMethods { allowed } => {
             evaluate_allowed_merge_methods(facts, allowed)
         }
-        RuleKind::RulesetRequiresStrictStatusChecks => evaluate_strict_status_checks(facts),
-        RuleKind::UsesRulesetsNotLegacyProtection => match facts.legacy_branch_protection {
+        RulesetCheck::RulesetRequiresStrictStatusChecks => evaluate_strict_status_checks(facts),
+        RulesetCheck::UsesRulesetsNotLegacyProtection => match facts.legacy_branch_protection {
             Gathered::Present(_) => RuleResult::Fail {
                 reason: "legacy branch protection is configured on the default branch".to_owned(),
             },
@@ -97,7 +119,6 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                     .to_owned(),
             },
         },
-        _ => unreachable!("non-ruleset rule passed to rulesets::evaluate"),
     }
 }
 

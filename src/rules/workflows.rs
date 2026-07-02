@@ -4,15 +4,33 @@ use crate::facts::{RepoFacts, WorkflowFile};
 use crate::workflow::expressions::{expression_blocks, references_secret, secret_tokens};
 use crate::workflow::model::{ActionReference, Job, Step, Workflow};
 
+use serde::{Deserialize, Serialize};
+
 use super::glob::{branch_matches_filters, branch_pattern_matches};
-use super::{RuleKind, RuleResult};
+use super::RuleResult;
 
 const REQUIRED_CHECKS_JOB_NAME: &str = "all-required-checks-complete";
 const REQUIRED_CHECKS_ACTION: &str = "G-Research/common-actions/check-required-lite";
 
-pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
-    match kind {
-        RuleKind::WorkflowExistsForDefaultBranch => {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WorkflowCheck {
+    WorkflowExistsForDefaultBranch,
+    WorkflowHasJob {
+        job_name: String,
+    },
+    WorkflowActionsPinnedToSha,
+    NoPullRequestTargetWithCheckout,
+    NoWorkflowRunTrigger,
+    NoPullRequestSecretReferences,
+    WorkflowUsesAction {
+        action: String,
+    },
+    WorkflowHasRequiredChecksComplete,
+}
+
+pub(super) fn evaluate(rule: &WorkflowCheck, facts: &RepoFacts) -> RuleResult {
+    match rule {
+        WorkflowCheck::WorkflowExistsForDefaultBranch => {
             let default_branch = facts.default_branch.to_string();
 
             if facts.workflows.iter().any(|workflow_file| {
@@ -27,7 +45,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::WorkflowHasJob { job_name } => {
+        WorkflowCheck::WorkflowHasJob { job_name } => {
             if facts
                 .workflows
                 .iter()
@@ -40,7 +58,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::WorkflowActionsPinnedToSha => {
+        WorkflowCheck::WorkflowActionsPinnedToSha => {
             let offenders = facts
                 .workflows
                 .iter()
@@ -76,7 +94,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::NoPullRequestTargetWithCheckout => {
+        WorkflowCheck::NoPullRequestTargetWithCheckout => {
             let offenders = facts
                 .workflows
                 .iter()
@@ -104,7 +122,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::NoWorkflowRunTrigger => {
+        WorkflowCheck::NoWorkflowRunTrigger => {
             let offenders = facts
                 .workflows
                 .iter()
@@ -124,7 +142,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::WorkflowUsesAction { action } => {
+        WorkflowCheck::WorkflowUsesAction { action } => {
             if facts
                 .workflows
                 .iter()
@@ -137,9 +155,8 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::WorkflowHasRequiredChecksComplete => evaluate_required_checks_complete(facts),
-        RuleKind::NoPullRequestSecretReferences => evaluate_pr_secrets(facts),
-        _ => unreachable!("non-workflow rule passed to workflows::evaluate"),
+        WorkflowCheck::WorkflowHasRequiredChecksComplete => evaluate_required_checks_complete(facts),
+        WorkflowCheck::NoPullRequestSecretReferences => evaluate_pr_secrets(facts),
     }
 }
 

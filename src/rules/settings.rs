@@ -1,10 +1,23 @@
+use serde::{Deserialize, Serialize};
+
 use crate::facts::RepoFacts;
 
-use super::{RuleKind, RuleResult, SettingValue};
+use super::{RepoSetting, RuleResult, SettingValue};
 
-pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
-    match kind {
-        RuleKind::RepoSettingMatch { setting, expected } => {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SettingCheck {
+    RepoSettingMatch {
+        setting: RepoSetting,
+        expected: SettingValue,
+    },
+    DefaultBranchNameIs {
+        name: String,
+    },
+}
+
+pub(super) fn evaluate(rule: &SettingCheck, facts: &RepoFacts) -> RuleResult {
+    match rule {
+        SettingCheck::RepoSettingMatch { setting, expected } => {
             let actual = setting.read(&facts.settings);
             if let SettingValue::Unknown = actual {
                 return RuleResult::Error {
@@ -28,7 +41,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        RuleKind::DefaultBranchNameIs { name } => {
+        SettingCheck::DefaultBranchNameIs { name } => {
             let actual = facts.default_branch.to_string();
             if &actual == name {
                 RuleResult::Pass
@@ -38,6 +51,5 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        _ => unreachable!("non-setting rule passed to settings::evaluate"),
     }
 }
