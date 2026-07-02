@@ -2223,6 +2223,133 @@ fn ruleset_with_empty_include_does_not_apply() {
     ));
 }
 
+#[test]
+fn ruleset_with_qualified_default_branch_pattern_applies() {
+    // GitHub returns `refs/heads/`-qualified include patterns; a hand-created
+    // ruleset targeting `refs/heads/main` must be recognised as covering the
+    // default branch `main`.
+    let mut facts = base_facts();
+    facts.default_branch = BranchName::new("main");
+    let mut ruleset = active_branch_ruleset(Vec::new());
+    ruleset.conditions = Some(RulesetConditions {
+        ref_name: Some(RefNameCondition {
+            include: vec!["refs/heads/main".to_owned()],
+            exclude: Vec::new(),
+        }),
+    });
+    facts.rulesets = vec![ruleset];
+
+    assert_eq!(
+        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn ruleset_with_qualified_glob_pattern_applies() {
+    let mut facts = base_facts();
+    facts.default_branch = BranchName::new("main");
+    let mut ruleset = active_branch_ruleset(Vec::new());
+    ruleset.conditions = Some(RulesetConditions {
+        ref_name: Some(RefNameCondition {
+            include: vec!["refs/heads/ma*".to_owned()],
+            exclude: Vec::new(),
+        }),
+    });
+    facts.rulesets = vec![ruleset];
+
+    assert_eq!(
+        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+        RuleResult::Pass
+    );
+}
+
+#[test]
+fn ruleset_excluding_qualified_default_branch_does_not_apply() {
+    // The dangerous false-pass: `include: ~ALL` with `exclude: refs/heads/main`
+    // must be judged as NOT covering the default branch. Before qualification the
+    // exclude pattern was matched against the bare name and silently missed.
+    let mut facts = base_facts();
+    facts.default_branch = BranchName::new("main");
+    let mut ruleset = active_branch_ruleset(Vec::new());
+    ruleset.conditions = Some(RulesetConditions {
+        ref_name: Some(RefNameCondition {
+            include: vec!["~ALL".to_owned()],
+            exclude: vec!["refs/heads/main".to_owned()],
+        }),
+    });
+    facts.rulesets = vec![ruleset];
+
+    assert!(matches!(
+        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_scoped_to_qualified_other_branch_does_not_apply() {
+    let mut facts = base_facts();
+    facts.default_branch = BranchName::new("main");
+    let mut ruleset = active_branch_ruleset(Vec::new());
+    ruleset.conditions = Some(RulesetConditions {
+        ref_name: Some(RefNameCondition {
+            include: vec!["refs/heads/release/*".to_owned()],
+            exclude: Vec::new(),
+        }),
+    });
+    facts.rulesets = vec![ruleset];
+
+    assert!(matches!(
+        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+        RuleResult::Fail { .. }
+    ));
+}
+
+fn refname_branch_strategy() -> impl Strategy<Value = String> {
+    "[a-z][a-z0-9-]{0,8}(/[a-z0-9-]{1,8}){0,2}"
+}
+
+fn refname_glob_pattern_strategy() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            "[a-z0-9-]{1,6}",
+            Just("*".to_owned()),
+            Just("**".to_owned())
+        ],
+        1..4,
+    )
+    .prop_map(|parts| parts.join("/"))
+}
+
+proptest! {
+    /// A `refs/heads/`-qualified include pattern covers the default branch iff
+    /// the equivalent bare glob matches the bare branch name — i.e. the ruleset
+    /// matcher delegates ref-name globbing to the (independently property-tested)
+    /// branch glob, only after qualifying the ref as `refs/heads/{branch}`.
+    #[test]
+    fn qualified_include_pattern_matches_iff_bare_glob_matches(
+        pattern in refname_glob_pattern_strategy(),
+        branch in refname_branch_strategy(),
+    ) {
+        let mut facts = base_facts();
+        facts.default_branch = BranchName::new(branch.clone());
+        let mut ruleset = active_branch_ruleset(Vec::new());
+        ruleset.conditions = Some(RulesetConditions {
+            ref_name: Some(RefNameCondition {
+                include: vec![format!("refs/heads/{pattern}")],
+                exclude: Vec::new(),
+            }),
+        });
+        facts.rulesets = vec![ruleset];
+
+        let covered = matches!(
+            evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+            RuleResult::Pass
+        );
+        prop_assert_eq!(covered, branch_pattern_matches(&pattern, &branch));
+    }
+}
+
 fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> WorkflowFile {
     WorkflowFile {
         path: ".github/workflows/ci.yml".to_owned(),
