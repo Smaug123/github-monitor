@@ -257,7 +257,7 @@ The default rule set is currently fixed in code.
 | `WF003` | `pull_request_target` workflows do not use `actions/checkout` |
 | `WF004` | A workflow defines an `all-required-checks-complete` aggregator job |
 | `WF005` | No workflow uses the `workflow_run` trigger |
-| `WF006` | PR-triggered workflows do not reference `${{ secrets.* }}` |
+| `WF006` | PR-triggered workflows do not access secrets (`secrets.*`, `toJSON(secrets)`, `secrets: inherit`) |
 | `NX001` | `flake.nix` exists |
 | `NX002` | The flake has observable check coverage |
 | `FL001` | `.envrc` exists |
