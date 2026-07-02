@@ -199,9 +199,21 @@ fn evaluate_repo_reports<F>(
 where
     F: FnOnce(&[RepoFacts], &[RepoConfig]) -> Vec<Vec<RepoFix>>,
 {
-    debug_assert_eq!(facts.len(), repo_configs.len());
+    assert_eq!(
+        facts.len(),
+        repo_configs.len(),
+        "facts/config length mismatch: {} facts vs {} repo configs — zipping would silently drop repos",
+        facts.len(),
+        repo_configs.len(),
+    );
     let repo_fixes = repo_fixes(&facts, repo_configs);
-    debug_assert_eq!(facts.len(), repo_fixes.len());
+    assert_eq!(
+        facts.len(),
+        repo_fixes.len(),
+        "facts/fixes length mismatch: {} facts vs {} fix batches — zipping would silently drop repos",
+        facts.len(),
+        repo_fixes.len(),
+    );
 
     std::iter::zip(facts, repo_configs.iter().zip(repo_fixes))
         .map(|(repo_facts, (repo_config, fixes))| {
@@ -220,7 +232,13 @@ fn build_planned_repo_fixes(facts: &[RepoFacts], repo_configs: &[RepoConfig]) ->
 }
 
 fn plan_repo_fix_batches(facts: &[RepoFacts], repo_configs: &[RepoConfig]) -> Vec<Vec<PlannedFix>> {
-    debug_assert_eq!(facts.len(), repo_configs.len());
+    assert_eq!(
+        facts.len(),
+        repo_configs.len(),
+        "facts/config length mismatch: {} facts vs {} repo configs — zipping would silently drop repos",
+        facts.len(),
+        repo_configs.len(),
+    );
     std::iter::zip(facts.iter(), repo_configs.iter())
         .map(|(repo_facts, repo_config)| plan_repo_fixes(&rules_for_repo(repo_config), repo_facts))
         .collect()
@@ -522,6 +540,48 @@ mod tests {
             loki_job: DEFAULT_JOB_LABEL.to_owned(),
             loki_push_url: None,
         }
+    }
+
+    fn two_repo_facts() -> Vec<RepoFacts> {
+        let config = Config::from_path(fixture_path("tests/fixtures/repos.toml")).unwrap();
+        let facts =
+            load_facts(&config, &SnapshotMode::Load(fixture_path("tests/fixtures"))).unwrap();
+        assert_eq!(facts.len(), 2, "fixture is expected to hold two repos");
+        facts
+    }
+
+    // The `facts`/`repo_configs`/`repo_fixes` slices are zipped together, so a
+    // length mismatch silently truncates to the shortest in release builds
+    // (`debug_assert` compiled out), dropping repos from the report. These must
+    // crash instead — verified under `cargo test --release`, where a plain
+    // `debug_assert` would not fire and the `#[should_panic]` would fail.
+
+    #[test]
+    #[should_panic(expected = "facts/config length mismatch")]
+    fn evaluate_repo_reports_rejects_facts_config_length_mismatch() {
+        let config = Config::from_path(fixture_path("tests/fixtures/repos.toml")).unwrap();
+        let facts = two_repo_facts();
+        let _ = evaluate_repo_reports(facts, &config.repos[..1], build_planned_repo_fixes);
+    }
+
+    #[test]
+    #[should_panic(expected = "facts/fixes length mismatch")]
+    fn evaluate_repo_reports_rejects_fixes_length_mismatch() {
+        let config = Config::from_path(fixture_path("tests/fixtures/repos.toml")).unwrap();
+        let facts = two_repo_facts();
+        // `repo_configs` matches `facts`, but the fix planner returns one batch too
+        // many, so the second length check is the one under test here.
+        let _ = evaluate_repo_reports(facts, &config.repos, |facts, _| {
+            vec![Vec::new(); facts.len() + 1]
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "facts/config length mismatch")]
+    fn plan_repo_fix_batches_rejects_facts_config_length_mismatch() {
+        let config = Config::from_path(fixture_path("tests/fixtures/repos.toml")).unwrap();
+        let facts = two_repo_facts();
+        let _ = plan_repo_fix_batches(&facts, &config.repos[..1]);
     }
 
     #[test]
