@@ -149,6 +149,15 @@ impl GitHubClient {
     pub fn with_auth(auth: GitHubAuth) -> Self {
         let agent: Agent = Agent::config_builder()
             .http_status_as_error(false)
+            // Never follow redirects. ureq's default follows up to 10 and strips
+            // the `Authorization` header on the way, which would silently turn a
+            // mutation against a renamed repo (GitHub 301s `/repos/{owner}/{repo}`)
+            // into an anonymous request that reports success while writing nothing,
+            // reduce `get_branch_protection` to an anonymous 404, and poison the
+            // rate-limit state with the 60/hr anonymous headers. With `0`, ureq
+            // returns the 3xx response as-is and our non-success handling surfaces
+            // it as a hard `UnexpectedStatus` error — fail loud on renames.
+            .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(30)))
             .build()
             .into();
@@ -1491,6 +1500,33 @@ mod tests {
         let repo = client.get_repo(&RepoRef::new(owner, name)).unwrap();
 
         assert!(!repo.default_branch.to_string().is_empty());
+    }
+
+    #[test]
+    fn redirect_responses_are_surfaced_as_errors_not_followed() {
+        // GitHub 301s `/repos/{owner}/{repo}` after a rename. ureq's defaults
+        // would follow the redirect (stripping Authorization), silently turning a
+        // mutation into an anonymous request and poisoning rate-limit state. We
+        // must surface the 3xx as a hard error instead. The redirect target is an
+        // unroutable port, so a client that *did* follow would produce a transport
+        // error rather than `UnexpectedStatus { status: 301 }`.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request(&mut stream);
+            let response = "HTTP/1.1 301 Moved Permanently\r\n\
+                 Location: http://127.0.0.1:1/moved\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut client =
+            GitHubClient::with_base_url(GitHubToken::new("token"), format!("http://{address}"));
+        let error = client.get_repo(&RepoRef::new("owner", "repo")).unwrap_err();
+        handle.join().unwrap();
+
+        assert_unexpected_status(error, 301);
     }
 
     fn assert_unexpected_status(error: GitHubClientError, expected_status: u16) {
