@@ -229,9 +229,15 @@ fn fetch_workflows(
 }
 
 fn is_workflow_path(path: &str) -> bool {
-    path.starts_with(".github/workflows/")
+    // GitHub only runs workflow files placed directly in `.github/workflows/`,
+    // not in subdirectories, so the remainder must be a single file name with no
+    // further `/`. A nested (or non-workflow) YAML there is not a workflow.
+    let Some(file) = path.strip_prefix(".github/workflows/") else {
+        return false;
+    };
+    !file.contains('/')
         && matches!(
-            Path::new(path)
+            Path::new(file)
                 .extension()
                 .and_then(|extension| extension.to_str()),
             Some("yml" | "yaml")
@@ -410,6 +416,26 @@ impl std::error::Error for SnapshotError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_workflow_path_only_matches_top_level_yaml() {
+        assert!(is_workflow_path(".github/workflows/ci.yml"));
+        assert!(is_workflow_path(".github/workflows/release.yaml"));
+
+        // GitHub only runs workflow files directly in `.github/workflows/`, not
+        // in subdirectories, so a nested file must not be treated as a workflow
+        // (a non-workflow YAML there would otherwise fail to parse and abort the
+        // whole run).
+        assert!(!is_workflow_path(".github/workflows/sub/ci.yml"));
+        assert!(!is_workflow_path(".github/workflows/nested/deep/ci.yaml"));
+
+        // Non-YAML and non-workflow paths.
+        assert!(!is_workflow_path(".github/workflows/README.md"));
+        assert!(!is_workflow_path(".github/workflows"));
+        assert!(!is_workflow_path(".github/workflows/"));
+        assert!(!is_workflow_path("docs/ci.yml"));
+    }
+
     use crate::github::types::{
         BranchProtection, BypassActor, BypassActorType, BypassMode, MergeMethod,
         PullRequestParameters, RefNameCondition, RequiredStatusCheck,
