@@ -1487,7 +1487,9 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
                 repo: facts.repo.clone(),
                 policy: policy.clone(),
             }),
-            RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, expected }) if setting.is_safe_to_auto_fix() => {
+            RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, expected })
+                if setting.is_safe_to_auto_fix() =>
+            {
                 FixPlan::Effect(FixEffect::SetRepositorySetting {
                     repo: facts.repo.clone(),
                     setting: setting.clone(),
@@ -1496,13 +1498,17 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
                         .expect("auto-fix is gated to bool-valued repository settings"),
                 })
             }
-            RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, .. }) => FixPlan::Rejected {
-                reason: format!(
-                    "automatic fixes for repository setting `{}` are not enabled",
-                    setting.name()
-                ),
-            },
-            RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha) => plan_workflow_pin_pull_request(facts),
+            RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, .. }) => {
+                FixPlan::Rejected {
+                    reason: format!(
+                        "automatic fixes for repository setting `{}` are not enabled",
+                        setting.name()
+                    ),
+                }
+            }
+            RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha) => {
+                plan_workflow_pin_pull_request(facts)
+            }
             RuleKind::Ruleset(RulesetCheck::RulesetRequiresLinearHistory) => {
                 plan_add_ruleset_rule(facts, RulesetRuleType::RequiredLinearHistory)
             }
@@ -1535,7 +1541,9 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection) => {
                 plan_delete_legacy_branch_protection(facts)
             }
-            RuleKind::Ruleset(RulesetCheck::RulesetExists) => plan_create_default_branch_ruleset(facts),
+            RuleKind::Ruleset(RulesetCheck::RulesetExists) => {
+                plan_create_default_branch_ruleset(facts)
+            }
             _ => FixPlan::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
             },
@@ -2105,8 +2113,8 @@ mod tests {
     use super::*;
     use crate::config::{RepoConfig, Visibility};
     use crate::facts::{RepoSettings, WorkflowFile};
-    use crate::types::Gathered;
     use crate::rules::{RepoSetting, Rule, SettingValue, rules_for_repo};
+    use crate::types::Gathered;
     use crate::workflow::model::{
         ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step, StepKind, Triggers,
         Workflow, WorkflowDispatch,
@@ -4544,7 +4552,11 @@ mod tests {
     }
 
     fn rs001_rule() -> Rule {
-        Rule::new("RS001", "Rulesets exist", RuleKind::Ruleset(RulesetCheck::RulesetExists))
+        Rule::new(
+            "RS001",
+            "Rulesets exist",
+            RuleKind::Ruleset(RulesetCheck::RulesetExists),
+        )
     }
 
     #[test]

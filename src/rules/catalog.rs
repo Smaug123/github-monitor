@@ -8,7 +8,11 @@ use super::{
 
 pub fn default_rules() -> Vec<Rule> {
     vec![
-        Rule::new("RS001", "Rulesets exist", RuleKind::Ruleset(RulesetCheck::RulesetExists)),
+        Rule::new(
+            "RS001",
+            "Rulesets exist",
+            RuleKind::Ruleset(RulesetCheck::RulesetExists),
+        ),
         Rule::new(
             "RS004",
             "Organization admins or repository roles cannot bypass rulesets",
@@ -94,7 +98,11 @@ pub fn default_rules() -> Vec<Rule> {
             "No `secrets` references in PR-triggered workflows",
             RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
         ),
-        Rule::new("NX001", "flake.nix exists", RuleKind::File(FileCheck::NixFlakeExists)),
+        Rule::new(
+            "NX001",
+            "flake.nix exists",
+            RuleKind::File(FileCheck::NixFlakeExists),
+        ),
         Rule::new(
             "NX002",
             "The flake has observable check coverage",

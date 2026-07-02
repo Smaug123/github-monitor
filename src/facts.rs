@@ -435,11 +435,15 @@ mod tests {
         prop_oneof![
             Just(Gathered::Absent),
             Just(Gathered::Unknown),
-            Just(Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)),
+            Just(Gathered::Present(
+                ForkPrApprovalPolicy::AllExternalContributors
+            )),
             Just(Gathered::Present(
                 ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub
             )),
-            Just(Gathered::Present(ForkPrApprovalPolicy::FirstTimeContributors)),
+            Just(Gathered::Present(
+                ForkPrApprovalPolicy::FirstTimeContributors
+            )),
             "[a-z][a-z0-9_]{0,16}"
                 .prop_map(|value| Gathered::Present(ForkPrApprovalPolicy::Unknown(value))),
         ]
@@ -573,8 +577,8 @@ mod tests {
     /// Unmodeled parameter keys GitHub may attach to a rule. Keys are synthetic and
     /// disjoint from the modeled fields; values are limited to strings/bools so JSON
     /// round-trip equality is exact.
-    fn ruleset_extra_parameters_strategy(
-    ) -> impl Strategy<Value = serde_json::Map<String, serde_json::Value>> {
+    fn ruleset_extra_parameters_strategy()
+    -> impl Strategy<Value = serde_json::Map<String, serde_json::Value>> {
         proptest::collection::btree_map(
             "x_extra_[a-z]{1,8}",
             prop_oneof![
@@ -1078,9 +1082,7 @@ mod tests {
                 present: || {
                     serde_json::to_value(Gathered::Present(BranchProtection::default())).unwrap()
                 },
-                contrasting: || {
-                    serde_json::to_value(Gathered::<BranchProtection>::Absent).unwrap()
-                },
+                contrasting: || serde_json::to_value(Gathered::<BranchProtection>::Absent).unwrap(),
                 unknown: || serde_json::to_value(Gathered::<BranchProtection>::Unknown).unwrap(),
             },
             HoleableFact {
@@ -1115,7 +1117,8 @@ mod tests {
                 .get_mut(*key)
                 .expect("intermediate path element must exist");
         }
-        node.as_object_mut().expect("parent of field must be an object")
+        node.as_object_mut()
+            .expect("parent of field must be an object")
     }
 
     fn set_field(
