@@ -23,7 +23,7 @@ use crate::github::client::{GitHubClient, GitHubToken};
 use crate::loki::{DEFAULT_JOB_LABEL, LokiPushError};
 use crate::remediation::{PlannedFix, RepoFix, execute_repo_fixes, plan_repo_fixes};
 use crate::report::{OutputFormat, OutputFormatError, RepoReport, ReportError};
-use crate::rules::{evaluate_rules, rules_for_repo};
+use crate::rules::{evaluate_rules, rules_for_repo, unknown_disabled_rule_ids};
 use crate::types::RepoRef;
 
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
@@ -76,6 +76,7 @@ fn try_main() -> Result<ExitCode, MainError> {
 
 fn run(args: CliArgs) -> Result<RunOutput, AppError> {
     let config = Config::from_path(&args.config_path)?;
+    validate_disabled_rules(&config)?;
     let reports = match args.execution_mode {
         ExecutionMode::Plan => {
             let facts = load_facts(&config, &args.snapshot_mode)?;
@@ -102,6 +103,23 @@ fn run(args: CliArgs) -> Result<RunOutput, AppError> {
     };
 
     Ok(RunOutput { reports, rendered })
+}
+
+/// Rejects any `disabled_rules` entry that names a rule the catalog does not
+/// define, before any facts are gathered or fixes planned. A typo would
+/// otherwise silently fail to disable the rule — and, worse, `--fix` would
+/// mutate the repo for a rule the user believes is off.
+fn validate_disabled_rules(config: &Config) -> Result<(), AppError> {
+    for repo in &config.repos {
+        let unknown = unknown_disabled_rule_ids(repo);
+        if !unknown.is_empty() {
+            return Err(AppError::UnknownDisabledRules {
+                repo: repo.repo_ref(),
+                ids: unknown,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn load_facts(config: &Config, snapshot_mode: &SnapshotMode) -> Result<Vec<RepoFacts>, AppError> {
@@ -406,6 +424,10 @@ enum AppError {
     Clock {
         source: std::time::SystemTimeError,
     },
+    UnknownDisabledRules {
+        repo: RepoRef,
+        ids: Vec<String>,
+    },
 }
 
 impl From<ConfigError> for AppError {
@@ -464,6 +486,13 @@ impl std::fmt::Display for AppError {
             Self::Report(source) => source.fmt(f),
             Self::LokiPush { source } => source.fmt(f),
             Self::Clock { source } => write!(f, "failed to read system clock: {source}"),
+            Self::UnknownDisabledRules { repo, ids } => {
+                write!(
+                    f,
+                    "config for {repo} disables unknown rule id(s): {}",
+                    ids.join(", ")
+                )
+            }
         }
     }
 }
@@ -482,6 +511,7 @@ impl std::error::Error for AppError {
             Self::Report(source) => Some(source),
             Self::LokiPush { source } => Some(source),
             Self::Clock { source } => Some(source),
+            Self::UnknownDisabledRules { .. } => None,
         }
     }
 }
@@ -557,6 +587,42 @@ mod tests {
     // (`debug_assert` compiled out), dropping repos from the report. These must
     // crash instead — verified under `cargo test --release`, where a plain
     // `debug_assert` would not fire and the `#[should_panic]` would fail.
+
+    fn repo_config_with_disabled(disabled: Option<Vec<String>>) -> RepoConfig {
+        RepoConfig {
+            owner: "example-org".to_owned(),
+            name: "example-repo".to_owned(),
+            visibility: crate::config::Visibility::Public,
+            disabled_rules: disabled,
+        }
+    }
+
+    #[test]
+    fn validate_disabled_rules_rejects_unknown_ids() {
+        let config = Config {
+            repos: vec![repo_config_with_disabled(Some(vec![
+                "RS001".to_owned(),
+                "NOPE".to_owned(),
+            ]))],
+        };
+        let error = validate_disabled_rules(&config).unwrap_err();
+        match error {
+            AppError::UnknownDisabledRules { ids, .. } => assert_eq!(ids, vec!["NOPE".to_owned()]),
+            other => panic!("expected UnknownDisabledRules, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_disabled_rules_accepts_known_ids() {
+        let config = Config {
+            repos: vec![repo_config_with_disabled(Some(vec![
+                "RS001".to_owned(),
+                "ST009".to_owned(),
+            ]))],
+        };
+        assert!(validate_disabled_rules(&config).is_ok());
+        assert!(validate_disabled_rules(&Config { repos: vec![] }).is_ok());
+    }
 
     #[test]
     #[should_panic(expected = "facts/config length mismatch")]

@@ -1046,6 +1046,55 @@ fn rules_for_repo_ids_are_unique() {
 }
 
 #[test]
+fn rules_for_repo_excludes_disabled_rules() {
+    let mut config = repo_config_with_visibility(Visibility::Private);
+    config.disabled_rules = Some(vec!["RS001".to_owned(), "WF002".to_owned()]);
+    let ids: BTreeSet<String> = rules_for_repo(&config)
+        .into_iter()
+        .map(|rule| rule.id.to_string())
+        .collect();
+
+    assert!(!ids.contains("RS001"), "RS001 should be disabled");
+    assert!(!ids.contains("WF002"), "WF002 should be disabled");
+    assert!(ids.contains("RS004"), "other rules stay enabled");
+    assert!(ids.contains("ST009"), "the per-repo ST009 stays enabled");
+}
+
+#[test]
+fn rules_for_repo_keeps_everything_when_none_disabled() {
+    let config = repo_config_with_visibility(Visibility::Private);
+    let ids: BTreeSet<String> = rules_for_repo(&config)
+        .into_iter()
+        .map(|rule| rule.id.to_string())
+        .collect();
+    assert!(ids.contains("RS001"));
+}
+
+#[test]
+fn unknown_disabled_rule_ids_detects_unknown_and_accepts_known() {
+    let mut config = repo_config_with_visibility(Visibility::Private);
+    // RS001 and the per-repo ST009 are valid; RS999/typo are not.
+    config.disabled_rules = Some(vec![
+        "RS001".to_owned(),
+        "ST009".to_owned(),
+        "RS999".to_owned(),
+        "typo".to_owned(),
+    ]);
+    assert_eq!(
+        unknown_disabled_rule_ids(&config),
+        vec!["RS999".to_owned(), "typo".to_owned()]
+    );
+}
+
+#[test]
+fn unknown_disabled_rule_ids_empty_when_all_known_or_none() {
+    let mut config = repo_config_with_visibility(Visibility::Private);
+    assert!(unknown_disabled_rule_ids(&config).is_empty());
+    config.disabled_rules = Some(vec!["RS001".to_owned(), "ST009".to_owned()]);
+    assert!(unknown_disabled_rule_ids(&config).is_empty());
+}
+
+#[test]
 fn workflow_has_job_passes_when_job_exists() {
     let mut facts = base_facts();
     facts.workflows = vec![workflow_with_single_job("build-and-test", Vec::new())];
