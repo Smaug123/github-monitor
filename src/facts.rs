@@ -1180,12 +1180,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires GITHUB_TOKEN and network access"]
+    #[ignore = "requires GITHUB_TOKEN + network access and GITHUB_PUBLIC_REPO"]
     fn gathers_public_repo_facts() {
+        // Not hardcoded to a third party's repo: point GITHUB_PUBLIC_REPO at any
+        // public repo you choose (e.g. one of your own) that has at least one
+        // Actions workflow, since this asserts `workflows` is non-empty.
         let token = crate::github::client::GitHubToken::from_env("GITHUB_TOKEN")
             .expect("GITHUB_TOKEN must be set");
+        let spec = std::env::var("GITHUB_PUBLIC_REPO").expect(
+            "set GITHUB_PUBLIC_REPO=owner/name to a public repo you can read that has \
+             at least one Actions workflow",
+        );
+        let (owner, name) = spec
+            .split_once('/')
+            .expect("GITHUB_PUBLIC_REPO must be owner/name");
         let mut client = GitHubClient::new(token);
-        let facts = gather_repo_facts(&mut client, RepoRef::new("rust-lang", "cargo")).unwrap();
+        let facts = gather_repo_facts(&mut client, RepoRef::new(owner, name)).unwrap();
 
         assert!(!facts.default_branch.to_string().is_empty());
         assert!(!facts.workflows.is_empty());
