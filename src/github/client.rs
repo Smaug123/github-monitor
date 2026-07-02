@@ -1476,13 +1476,19 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires GITHUB_TOKEN and network access"]
+    #[ignore = "requires GITHUB_TOKEN + network access and GITHUB_PUBLIC_REPO"]
     fn fetches_public_repo_metadata() {
+        // Not hardcoded to a third party's repo: point GITHUB_PUBLIC_REPO at any
+        // public repo you choose (e.g. one of your own) whose metadata your token
+        // can read.
         let token = GitHubToken::from_env("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set");
+        let spec = std::env::var("GITHUB_PUBLIC_REPO")
+            .expect("set GITHUB_PUBLIC_REPO=owner/name to a public repo you can read");
+        let (owner, name) = spec
+            .split_once('/')
+            .expect("GITHUB_PUBLIC_REPO must be owner/name");
         let mut client = GitHubClient::new(token);
-        let repo = client
-            .get_repo(&RepoRef::new("rust-lang", "cargo"))
-            .unwrap();
+        let repo = client.get_repo(&RepoRef::new(owner, name)).unwrap();
 
         assert!(!repo.default_branch.to_string().is_empty());
     }
