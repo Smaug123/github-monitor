@@ -1,0 +1,20 @@
+{
+  "api_version": "2022-11-28",
+  "local_tightenings": [
+    {
+      "fixtures": [
+        "create-ruleset",
+        "update-ruleset"
+      ],
+      "pointer": "/properties/conditions/properties/ref_name",
+      "reason": "422 \"Missing required parameter `exclude`\" when ref_name is present (commit 94d775f)",
+      "required": [
+        "include",
+        "exclude"
+      ]
+    }
+  ],
+  "note": "Regenerate with `cargo run --bin regen_openapi_fixtures`. Do not edit by hand.",
+  "source_commit": "b150df103aaab9f965a4d85aaaffa768e714fa7f",
+  "source_repo": "github/rest-api-description"
+}

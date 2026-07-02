@@ -1,0 +1,15 @@
+{
+  "properties": {
+    "ref": {
+      "type": "string"
+    },
+    "sha": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "ref",
+    "sha"
+  ],
+  "type": "object"
+}

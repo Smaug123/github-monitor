@@ -1,0 +1,35 @@
+{
+  "properties": {
+    "base": {
+      "type": "string"
+    },
+    "body": {
+      "type": "string"
+    },
+    "draft": {
+      "type": "boolean"
+    },
+    "head": {
+      "type": "string"
+    },
+    "head_repo": {
+      "format": "repo.nwo",
+      "type": "string"
+    },
+    "issue": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "maintainer_can_modify": {
+      "type": "boolean"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "head",
+    "base"
+  ],
+  "type": "object"
+}

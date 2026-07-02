@@ -1,0 +1,16 @@
+{
+  "properties": {
+    "approval_policy": {
+      "enum": [
+        "first_time_contributors_new_to_github",
+        "first_time_contributors",
+        "all_external_contributors"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "approval_policy"
+  ],
+  "type": "object"
+}

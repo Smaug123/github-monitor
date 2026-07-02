@@ -1,0 +1,57 @@
+{
+  "properties": {
+    "author": {
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email"
+      ],
+      "type": "object"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "committer": {
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "email"
+      ],
+      "type": "object"
+    },
+    "content": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "sha": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "message",
+    "content"
+  ],
+  "type": "object"
+}

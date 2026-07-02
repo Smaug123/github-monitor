@@ -2,6 +2,8 @@ mod config;
 mod facts;
 mod github;
 mod loki;
+#[cfg(test)]
+mod openapi;
 mod remediation;
 mod report;
 mod rules;

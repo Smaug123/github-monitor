@@ -227,46 +227,159 @@ pub struct BypassActor {
     pub bypass_mode: BypassMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RulesetRule {
-    #[serde(rename = "type")]
-    pub kind: RulesetRuleType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<RulesetRuleParameters>,
+/// A single rule within a ruleset. On the wire each rule is a
+/// `{"type": <kind>, "parameters": {...}}` object whose parameter shape depends
+/// on the kind. The two kinds this crate reads and rewrites in detail get typed
+/// variants, so an incomplete `pull_request` rule (missing required review
+/// fields) or `required_status_checks` rule (missing its check list or strict
+/// flag) — the two historical 422s — is unrepresentable. Every other kind is
+/// carried in `Other` with its `parameters` object verbatim, so a ruleset read
+/// from the live API round-trips losslessly through a GET-modify-PUT.
+///
+/// `serde_json::Value` (in `Other` and the flattened `extra` maps) isn't `Eq`,
+/// so this type and its containers are `PartialEq`-only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RulesetRule {
+    PullRequest(PullRequestParameters),
+    RequiredStatusChecks(RequiredStatusChecksParameters),
+    /// Any other rule kind, with its `parameters` object preserved verbatim
+    /// (`None` when the rule carries no `parameters` key). Covers both the
+    /// parameterless kinds this crate only checks for presence and any kind it
+    /// does not model — so a fix's GET-modify-PUT never drops a rule's
+    /// configuration (finding 2).
+    Other {
+        kind: RulesetRuleType,
+        parameters: Option<serde_json::Value>,
+    },
 }
 
-// `PUT /repos/{o}/{r}/rulesets/{id}` replaces the whole ruleset, so a fix's
-// GET-modify-PUT re-sends every rule it didn't touch. We only model the parameters
-// the rules reason about; `extra` carries through everything else — parameters of
-// rule types we don't model, and new fields GitHub adds to types we do — so a fix
-// never silently resets configuration (or 422s by re-sending required parameters as
-// `{}`). A rule's `parameters` object is entirely writable, so echoing unknown keys
-// back is safe; contrast the top-level ruleset, whose read-only fields are excluded
-// by construction via the separate `UpdateRulesetRequest` shape. `serde_json::Value`
-// isn't `Eq`, which is why this struct and its containers are `PartialEq`-only.
+impl RulesetRule {
+    /// The rule's `type` discriminant, for presence checks and reporting.
+    pub fn kind(&self) -> RulesetRuleType {
+        match self {
+            RulesetRule::PullRequest(_) => RulesetRuleType::PullRequest,
+            RulesetRule::RequiredStatusChecks(_) => RulesetRuleType::RequiredStatusChecks,
+            RulesetRule::Other { kind, .. } => kind.clone(),
+        }
+    }
+
+    /// A parameterless rule of the given kind (e.g. `deletion`,
+    /// `required_linear_history`) — used when the planner adds a rule it only
+    /// needs to assert the presence of.
+    pub fn parameterless(kind: RulesetRuleType) -> Self {
+        RulesetRule::Other {
+            kind,
+            parameters: None,
+        }
+    }
+}
+
+impl Serialize for RulesetRule {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            RulesetRule::PullRequest(parameters) => {
+                map.serialize_entry("type", "pull_request")?;
+                map.serialize_entry("parameters", parameters)?;
+            }
+            RulesetRule::RequiredStatusChecks(parameters) => {
+                map.serialize_entry("type", "required_status_checks")?;
+                map.serialize_entry("parameters", parameters)?;
+            }
+            RulesetRule::Other { kind, parameters } => {
+                map.serialize_entry("type", kind)?;
+                if let Some(parameters) = parameters {
+                    map.serialize_entry("parameters", parameters)?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RulesetRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            parameters: Option<serde_json::Value>,
+        }
+
+        let Raw { kind, parameters } = Raw::deserialize(deserializer)?;
+        let rule = match kind.as_str() {
+            "pull_request" => RulesetRule::PullRequest(rule_parameters(&kind, parameters)?),
+            "required_status_checks" => {
+                RulesetRule::RequiredStatusChecks(rule_parameters(&kind, parameters)?)
+            }
+            _ => RulesetRule::Other {
+                kind: RulesetRuleType::from(kind),
+                parameters,
+            },
+        };
+        Ok(rule)
+    }
+}
+
+/// Parses a known rule kind's `parameters` object into its typed form. A known
+/// kind with parameters absent is a malformed rule (GitHub always sends them).
+fn rule_parameters<T, E>(kind: &str, parameters: Option<serde_json::Value>) -> Result<T, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    let parameters = parameters
+        .ok_or_else(|| E::custom(format!("`{kind}` ruleset rule is missing `parameters`")))?;
+    serde_json::from_value(parameters).map_err(E::custom)
+}
+
+/// Parameters of a `pull_request` ruleset rule. GitHub's create/update-ruleset
+/// endpoint requires all five review fields whenever the rule is present (a 422
+/// "data matches no possible input" otherwise), so they are non-optional and
+/// always serialized; see `new_pull_request_rule_with_required_defaults`. They
+/// are `#[serde(default)]` only so a response omitting one parses to GitHub's own
+/// default rather than erroring. `extra` carries any parameter the model doesn't
+/// name (e.g. `required_reviewers`) through GET-modify-PUT verbatim, so a fix
+/// never silently drops configuration GitHub still enforces (finding 2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct RulesetRuleParameters {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_status_checks: Vec<RequiredStatusCheck>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strict_required_status_checks_policy: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub required_approving_review_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub require_code_owner_review: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub require_last_push_approval: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub required_review_thread_resolution: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dismiss_stale_reviews_on_push: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub do_not_enforce_on_create: Option<bool>,
+pub struct PullRequestParameters {
+    #[serde(default)]
+    pub dismiss_stale_reviews_on_push: bool,
+    #[serde(default)]
+    pub require_code_owner_review: bool,
+    #[serde(default)]
+    pub require_last_push_approval: bool,
+    #[serde(default)]
+    pub required_approving_review_count: u32,
+    #[serde(default)]
+    pub required_review_thread_resolution: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_merge_methods: Vec<MergeMethod>,
-    /// Unmodeled parameters, carried through GET-modify-PUT verbatim. An empty map
-    /// flattens to nothing, so a rule with only modeled parameters serializes as
-    /// before.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Parameters of a `required_status_checks` ruleset rule. GitHub requires both
+/// the check list (which may be empty) and the strict-policy flag, so both are
+/// always serialized — dropping an empty check list yields a 422. `extra` carries
+/// unmodeled parameters through verbatim (see [`PullRequestParameters`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RequiredStatusChecksParameters {
+    #[serde(default)]
+    pub required_status_checks: Vec<RequiredStatusCheck>,
+    #[serde(default)]
+    pub strict_required_status_checks_policy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub do_not_enforce_on_create: Option<bool>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -666,6 +779,9 @@ mod tests {
       "parameters": {
         "required_approving_review_count": 2,
         "require_code_owner_review": true,
+        "require_last_push_approval": false,
+        "dismiss_stale_reviews_on_push": false,
+        "required_review_thread_resolution": false,
         "allowed_merge_methods": ["squash"]
       }
     }
@@ -678,9 +794,14 @@ mod tests {
         assert_eq!(ruleset.target, RulesetTarget::Branch);
         assert_eq!(ruleset.enforcement, RulesetEnforcement::Active);
         assert_eq!(ruleset.rules.len(), 2);
-        assert_eq!(ruleset.rules[0].kind, RulesetRuleType::RequiredStatusChecks);
-        assert_eq!(ruleset.rules[1].kind, RulesetRuleType::PullRequest);
-        let pull_request_parameters = ruleset.rules[1].parameters.as_ref().unwrap();
+        assert_eq!(
+            ruleset.rules[0].kind(),
+            RulesetRuleType::RequiredStatusChecks
+        );
+        assert_eq!(ruleset.rules[1].kind(), RulesetRuleType::PullRequest);
+        let RulesetRule::PullRequest(pull_request_parameters) = &ruleset.rules[1] else {
+            panic!("expected a pull_request rule, got {:?}", ruleset.rules[1]);
+        };
         assert_eq!(
             pull_request_parameters.allowed_merge_methods,
             vec![MergeMethod::Squash]
@@ -971,9 +1092,6 @@ mod tests {
     /// The write body is `UpdateRulesetRequest::from_ruleset`; this asserts it carries
     /// through both an unmodeled field on a *known* rule type and every parameter of an
     /// *unknown* rule type.
-    ///
-    /// RED today: unmodeled parameters deserialize into an empty struct and re-serialize
-    /// as `{}`.
     #[test]
     fn write_body_preserves_unmodeled_and_unknown_rule_parameters() {
         // A GET /repos/{o}/{r}/rulesets/{id} response as GitHub returns it.

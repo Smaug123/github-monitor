@@ -3,8 +3,9 @@ use crate::types::Gathered;
 use std::collections::BTreeSet;
 
 use crate::github::types::{
-    BranchProtection, BypassActor, BypassActorType, MergeMethod, RefNameCondition, Ruleset,
-    RulesetConditions, RulesetEnforcement, RulesetRuleType, RulesetTarget,
+    BranchProtection, BypassActor, BypassActorType, MergeMethod, PullRequestParameters,
+    RefNameCondition, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule, RulesetRuleType,
+    RulesetTarget,
 };
 
 use serde::{Deserialize, Serialize};
@@ -51,13 +52,13 @@ pub(super) fn evaluate(rule: &RulesetCheck, facts: &RepoFacts) -> RuleResult {
             }
 
             if active_branch_rulesets_for_default_branch(facts).any(|ruleset| {
-                ruleset.rules.iter().any(|rule| {
-                    rule.kind == RulesetRuleType::RequiredStatusChecks
-                        && rule.parameters.as_ref().is_some_and(|parameters| {
-                            parameters.required_status_checks.iter().any(|check| {
-                                check.context == *check_name && source.accepts(check.integration_id)
-                            })
+                ruleset.rules.iter().any(|rule| match rule {
+                    RulesetRule::RequiredStatusChecks(parameters) => {
+                        parameters.required_status_checks.iter().any(|check| {
+                            check.context == *check_name && source.accepts(check.integration_id)
                         })
+                    }
+                    _ => false,
                 })
             }) {
                 RuleResult::Pass
@@ -218,15 +219,11 @@ fn evaluate_allowed_merge_methods(facts: &RepoFacts, required: &[MergeMethod]) -
     let mut saw_pull_request_rule = false;
     for ruleset in active_branch_rulesets_for_default_branch(facts) {
         for rule in &ruleset.rules {
-            if rule.kind != RulesetRuleType::PullRequest {
+            let RulesetRule::PullRequest(parameters) = rule else {
                 continue;
-            }
+            };
             saw_pull_request_rule = true;
-            let actual = rule
-                .parameters
-                .as_ref()
-                .map(|parameters| merge_method_set(&parameters.allowed_merge_methods))
-                .unwrap_or_default();
+            let actual = merge_method_set(&parameters.allowed_merge_methods);
             if actual == required_set {
                 return RuleResult::Pass;
             }
@@ -261,12 +258,11 @@ fn evaluate_strict_status_checks(facts: &RepoFacts) -> RuleResult {
 
     let strict = active_branch_rulesets_for_default_branch(facts)
         .flat_map(|ruleset| ruleset.rules.iter())
-        .filter(|rule| rule.kind == RulesetRuleType::RequiredStatusChecks)
-        .any(|rule| {
-            rule.parameters
-                .as_ref()
-                .and_then(|parameters| parameters.strict_required_status_checks_policy)
-                .unwrap_or(false)
+        .any(|rule| match rule {
+            RulesetRule::RequiredStatusChecks(parameters) => {
+                parameters.strict_required_status_checks_policy
+            }
+            _ => false,
         });
 
     if strict {
@@ -298,9 +294,12 @@ fn ruleset_rule_presence_result(
         };
     }
 
-    if active_branch_rulesets_for_default_branch(facts)
-        .any(|ruleset| ruleset.rules.iter().any(|rule| rule.kind == required_kind))
-    {
+    if active_branch_rulesets_for_default_branch(facts).any(|ruleset| {
+        ruleset
+            .rules
+            .iter()
+            .any(|rule| rule.kind() == required_kind)
+    }) {
         RuleResult::Pass
     } else {
         RuleResult::Fail {
@@ -444,13 +443,11 @@ fn check_required_status_checks(
         let mut covered: BTreeSet<String> = BTreeSet::new();
         for ruleset in rulesets {
             for rule in &ruleset.rules {
-                if rule.kind != RulesetRuleType::RequiredStatusChecks {
+                let RulesetRule::RequiredStatusChecks(parameters) = rule else {
                     continue;
-                }
-                if let Some(parameters) = &rule.parameters {
-                    for check in &parameters.required_status_checks {
-                        covered.insert(check.context.clone());
-                    }
+                };
+                for check in &parameters.required_status_checks {
+                    covered.insert(check.context.clone());
                 }
             }
         }
@@ -470,13 +467,10 @@ fn check_required_status_checks(
     if checks.strict {
         let strict_satisfied = rulesets.iter().any(|ruleset| {
             ruleset.rules.iter().any(|rule| {
-                if rule.kind != RulesetRuleType::RequiredStatusChecks {
-                    return false;
-                }
-                let Some(parameters) = &rule.parameters else {
+                let RulesetRule::RequiredStatusChecks(parameters) = rule else {
                     return false;
                 };
-                if parameters.strict_required_status_checks_policy != Some(true) {
+                if !parameters.strict_required_status_checks_policy {
                     return false;
                 }
                 let ruleset_contexts: BTreeSet<String> = parameters
@@ -516,11 +510,13 @@ fn check_pull_request_reviews(
         );
     }
 
-    let pr_rules: Vec<&crate::github::types::RulesetRuleParameters> = rulesets
+    let pr_rules: Vec<&PullRequestParameters> = rulesets
         .iter()
         .flat_map(|ruleset| ruleset.rules.iter())
-        .filter(|rule| rule.kind == RulesetRuleType::PullRequest)
-        .filter_map(|rule| rule.parameters.as_ref())
+        .filter_map(|rule| match rule {
+            RulesetRule::PullRequest(parameters) => Some(parameters),
+            _ => None,
+        })
         .collect();
 
     if pr_rules.is_empty() {
@@ -537,7 +533,7 @@ fn check_pull_request_reviews(
     {
         let max_count = pr_rules
             .iter()
-            .filter_map(|parameters| parameters.required_approving_review_count)
+            .map(|parameters| parameters.required_approving_review_count)
             .max()
             .unwrap_or(0);
         if max_count < required_count {
@@ -584,8 +580,8 @@ fn check_pull_request_reviews(
 
 fn check_pr_boolean(
     legacy_value: bool,
-    pr_rules: &[&crate::github::types::RulesetRuleParameters],
-    extract: impl Fn(&crate::github::types::RulesetRuleParameters) -> Option<bool>,
+    pr_rules: &[&PullRequestParameters],
+    extract: impl Fn(&PullRequestParameters) -> bool,
     legacy_name: &str,
     ruleset_name: &str,
     reasons: &mut Vec<String>,
@@ -593,9 +589,7 @@ fn check_pr_boolean(
     if !legacy_value {
         return;
     }
-    let satisfied = pr_rules
-        .iter()
-        .any(|parameters| extract(parameters) == Some(true));
+    let satisfied = pr_rules.iter().any(|parameters| extract(parameters));
     if !satisfied {
         reasons.push(format!(
             "legacy `{legacy_name}` is enabled but no active branch ruleset `pull_request` rule \
@@ -617,9 +611,12 @@ fn check_rule_presence(
     if !flag.enabled {
         return;
     }
-    let present = rulesets
-        .iter()
-        .any(|ruleset| ruleset.rules.iter().any(|rule| rule.kind == required_kind));
+    let present = rulesets.iter().any(|ruleset| {
+        ruleset
+            .rules
+            .iter()
+            .any(|rule| rule.kind() == required_kind)
+    });
     if !present {
         reasons.push(format!(
             "legacy `{legacy_name}` is enabled but no active branch ruleset contains a \
@@ -635,9 +632,12 @@ fn check_force_push_or_deletion(
     legacy_description: &str,
     reasons: &mut Vec<String>,
 ) {
-    let present = rulesets
-        .iter()
-        .any(|ruleset| ruleset.rules.iter().any(|rule| rule.kind == required_kind));
+    let present = rulesets.iter().any(|ruleset| {
+        ruleset
+            .rules
+            .iter()
+            .any(|rule| rule.kind() == required_kind)
+    });
     if !present {
         reasons.push(format!(
             "legacy protection {legacy_description} but no active branch ruleset contains a \
@@ -658,13 +658,9 @@ fn check_conversation_resolution(
         return;
     }
     let satisfied = rulesets.iter().any(|ruleset| {
-        ruleset.rules.iter().any(|rule| {
-            rule.kind == RulesetRuleType::PullRequest
-                && rule
-                    .parameters
-                    .as_ref()
-                    .and_then(|parameters| parameters.required_review_thread_resolution)
-                    == Some(true)
+        ruleset.rules.iter().any(|rule| match rule {
+            RulesetRule::PullRequest(parameters) => parameters.required_review_thread_resolution,
+            _ => false,
         })
     });
     if !satisfied {

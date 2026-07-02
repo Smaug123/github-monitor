@@ -1,0 +1,232 @@
+{
+  "properties": {
+    "allow_auto_merge": {
+      "default": false,
+      "type": "boolean"
+    },
+    "allow_forking": {
+      "default": false,
+      "type": "boolean"
+    },
+    "allow_merge_commit": {
+      "default": true,
+      "type": "boolean"
+    },
+    "allow_rebase_merge": {
+      "default": true,
+      "type": "boolean"
+    },
+    "allow_squash_merge": {
+      "default": true,
+      "type": "boolean"
+    },
+    "allow_update_branch": {
+      "default": false,
+      "type": "boolean"
+    },
+    "archived": {
+      "default": false,
+      "type": "boolean"
+    },
+    "default_branch": {
+      "type": "string"
+    },
+    "delete_branch_on_merge": {
+      "default": false,
+      "type": "boolean"
+    },
+    "description": {
+      "type": "string"
+    },
+    "has_issues": {
+      "default": true,
+      "type": "boolean"
+    },
+    "has_projects": {
+      "default": true,
+      "type": "boolean"
+    },
+    "has_pull_requests": {
+      "default": true,
+      "type": "boolean"
+    },
+    "has_wiki": {
+      "default": true,
+      "type": "boolean"
+    },
+    "homepage": {
+      "type": "string"
+    },
+    "is_template": {
+      "default": false,
+      "type": "boolean"
+    },
+    "merge_commit_message": {
+      "enum": [
+        "PR_BODY",
+        "PR_TITLE",
+        "BLANK"
+      ],
+      "type": "string"
+    },
+    "merge_commit_title": {
+      "enum": [
+        "PR_TITLE",
+        "MERGE_MESSAGE"
+      ],
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "private": {
+      "default": false,
+      "type": "boolean"
+    },
+    "pull_request_creation_policy": {
+      "enum": [
+        "all",
+        "collaborators_only"
+      ],
+      "type": "string"
+    },
+    "security_and_analysis": {
+      "properties": {
+        "advanced_security": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "code_security": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "secret_scanning": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "secret_scanning_ai_detection": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "secret_scanning_delegated_alert_dismissal": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "secret_scanning_delegated_bypass": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "secret_scanning_delegated_bypass_options": {
+          "properties": {
+            "reviewers": {
+              "items": {
+                "properties": {
+                  "mode": {
+                    "default": "ALWAYS",
+                    "enum": [
+                      "ALWAYS",
+                      "EXEMPT"
+                    ],
+                    "type": "string"
+                  },
+                  "reviewer_id": {
+                    "type": "integer"
+                  },
+                  "reviewer_type": {
+                    "enum": [
+                      "TEAM",
+                      "ROLE"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "reviewer_id",
+                  "reviewer_type"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "secret_scanning_non_provider_patterns": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "secret_scanning_push_protection": {
+          "properties": {
+            "status": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "squash_merge_commit_message": {
+      "enum": [
+        "PR_BODY",
+        "COMMIT_MESSAGES",
+        "BLANK"
+      ],
+      "type": "string"
+    },
+    "squash_merge_commit_title": {
+      "enum": [
+        "PR_TITLE",
+        "COMMIT_OR_PR_TITLE"
+      ],
+      "type": "string"
+    },
+    "use_squash_pr_title_as_default": {
+      "default": false,
+      "type": "boolean"
+    },
+    "visibility": {
+      "enum": [
+        "public",
+        "private"
+      ],
+      "type": "string"
+    },
+    "web_commit_signoff_required": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "type": "object"
+}
