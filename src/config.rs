@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::types::RepoRef;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub repos: Vec<RepoConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepoConfig {
     pub owner: String,
     pub name: String,
@@ -201,6 +203,39 @@ visibility = "Private"
         assert!(
             result.is_err(),
             "expected parse error for non-lowercase visibility"
+        );
+    }
+
+    #[test]
+    fn repo_config_rejects_unknown_key() {
+        // A typo'd key like `visiblity` must not be silently dropped (which would
+        // let `visibility` fall back to its default and mask drift).
+        let toml = r#"
+[[repos]]
+owner = "example-org"
+name = "example-repo"
+visiblity = "private"
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(
+            result.is_err(),
+            "expected parse error for unknown repo key `visiblity`"
+        );
+    }
+
+    #[test]
+    fn config_rejects_unknown_top_level_key() {
+        let toml = r#"
+version = 2
+
+[[repos]]
+owner = "example-org"
+name = "example-repo"
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(
+            result.is_err(),
+            "expected parse error for unknown top-level key `version`"
         );
     }
 }
