@@ -443,6 +443,35 @@ impl GitHubClient {
         )
     }
 
+    /// The first open pull request whose head is `head_branch` in this repo,
+    /// optionally restricted to those targeting `base_branch`, or `None` if there
+    /// is none. Used to keep PR-opening fixes idempotent: a rerun finds the PR it
+    /// opened last time instead of opening a duplicate. Pass `Some(base)` to reuse
+    /// only a PR targeting the fix's base (a same-head PR retargeted elsewhere is
+    /// not the fix for `base`); pass `None` to detect whether the branch backs any
+    /// open PR at all before resetting it.
+    pub fn find_open_pull_request(
+        &mut self,
+        repo: &RepoRef,
+        head_branch: &str,
+        base_branch: Option<&str>,
+    ) -> Result<Option<PullRequest>, GitHubClientError> {
+        // GitHub's `head` filter is `owner:branch`.
+        let head = percent_encode_query_value(&format!("{}:{}", repo.owner, head_branch));
+        let mut url = format!(
+            "{}/repos/{repo}/pulls?state=open&head={head}",
+            self.api_base_url
+        );
+        if let Some(base_branch) = base_branch {
+            url.push_str(&format!(
+                "&base={}",
+                percent_encode_query_value(base_branch)
+            ));
+        }
+        let pulls: Vec<PullRequest> = self.get_json(repo, &url)?;
+        Ok(pulls.into_iter().next())
+    }
+
     pub fn get_git_tree(
         &mut self,
         repo: &RepoRef,
@@ -1527,6 +1556,47 @@ mod tests {
         handle.join().unwrap();
 
         assert_unexpected_status(error, 301);
+    }
+
+    #[test]
+    fn find_open_pull_request_filters_by_head_and_base() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/pulls?state=open&head=owner%3Agithub-infra%2Fadd-envrc&base=main",
+            200,
+            r#"[{"number":7,"html_url":"https://example.test/pr/7"}]"#,
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let pr = client
+            .find_open_pull_request(
+                &RepoRef::new("owner", "repo"),
+                "github-infra/add-envrc",
+                Some("main"),
+            )
+            .unwrap()
+            .expect("expected a pull request");
+        assert_eq!(pr.number, 7);
+    }
+
+    #[test]
+    fn find_open_pull_request_omits_base_when_none() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/pulls?state=open&head=owner%3Agithub-infra%2Fadd-envrc",
+            200,
+            "[]",
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let pr = client
+            .find_open_pull_request(
+                &RepoRef::new("owner", "repo"),
+                "github-infra/add-envrc",
+                None,
+            )
+            .unwrap();
+        assert!(pr.is_none());
     }
 
     fn assert_unexpected_status(error: GitHubClientError, expected_status: u16) {
