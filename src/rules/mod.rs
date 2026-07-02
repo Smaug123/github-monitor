@@ -11,12 +11,16 @@ mod workflows;
 #[cfg(test)]
 pub use self::catalog::default_rules;
 pub use self::catalog::rules_for_repo;
+pub use self::files::FileCheck;
 pub(crate) use self::rulesets::{
     active_branch_rulesets_for_default_branch, legacy_protection_superseded_by_rulesets,
 };
+pub use self::rulesets::RulesetCheck;
+pub use self::settings::SettingCheck;
 pub use self::types::{
     RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
 };
+pub use self::workflows::WorkflowCheck;
 
 use crate::facts::RepoFacts;
 
@@ -26,30 +30,9 @@ pub fn evaluate_rules(rules: &[Rule], facts: &RepoFacts) -> Vec<RuleOutput> {
 
 pub fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     match kind {
-        RuleKind::RulesetExists
-        | RuleKind::RulesetRequiresStatusCheck { .. }
-        | RuleKind::RulesetEnforcesAdmins
-        | RuleKind::RulesetRequiresLinearHistory
-        | RuleKind::RulesetPreventsForcePush
-        | RuleKind::RulesetRestrictsDeletions
-        | RuleKind::RulesetRequiresSignedCommits
-        | RuleKind::RulesetRequiresPullRequest
-        | RuleKind::RulesetRestrictsMergeMethods { .. }
-        | RuleKind::RulesetRequiresStrictStatusChecks
-        | RuleKind::UsesRulesetsNotLegacyProtection => rulesets::evaluate(kind, facts),
-        RuleKind::WorkflowExistsForDefaultBranch
-        | RuleKind::WorkflowHasJob { .. }
-        | RuleKind::WorkflowActionsPinnedToSha
-        | RuleKind::NoPullRequestTargetWithCheckout
-        | RuleKind::NoWorkflowRunTrigger
-        | RuleKind::NoPullRequestSecretReferences
-        | RuleKind::WorkflowUsesAction { .. }
-        | RuleKind::WorkflowHasRequiredChecksComplete => workflows::evaluate(kind, facts),
-        RuleKind::FileExists { .. } | RuleKind::NixFlakeExists | RuleKind::NixFlakeHasCheck => {
-            files::evaluate(kind, facts)
-        }
-        RuleKind::RepoSettingMatch { .. } | RuleKind::DefaultBranchNameIs { .. } => {
-            settings::evaluate(kind, facts)
-        }
+        RuleKind::Ruleset(rule) => rulesets::evaluate(rule, facts),
+        RuleKind::Workflow(rule) => workflows::evaluate(rule, facts),
+        RuleKind::File(rule) => files::evaluate(rule, facts),
+        RuleKind::Setting(rule) => settings::evaluate(rule, facts),
     }
 }

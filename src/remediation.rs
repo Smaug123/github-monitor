@@ -12,7 +12,8 @@ use crate::github::types::{
     UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::rules::{
-    RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
+    FileCheck, RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult,
+    RulesetCheck, SettingCheck, SettingValue, WorkflowCheck,
     active_branch_rulesets_for_default_branch, evaluate_rules,
     legacy_protection_superseded_by_rulesets,
 };
@@ -1479,14 +1480,14 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
         rule_id: output.id.clone(),
         rule_name: output.name.clone(),
         plan: match &rule.kind {
-            RuleKind::RepoSettingMatch {
+            RuleKind::Setting(SettingCheck::RepoSettingMatch {
                 setting: RepoSetting::ForkPrApprovalPolicy,
                 expected: SettingValue::ForkPrApprovalPolicy(Some(policy)),
-            } => FixPlan::Effect(FixEffect::SetForkPrApprovalPolicy {
+            }) => FixPlan::Effect(FixEffect::SetForkPrApprovalPolicy {
                 repo: facts.repo.clone(),
                 policy: policy.clone(),
             }),
-            RuleKind::RepoSettingMatch { setting, expected } if setting.is_safe_to_auto_fix() => {
+            RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, expected }) if setting.is_safe_to_auto_fix() => {
                 FixPlan::Effect(FixEffect::SetRepositorySetting {
                     repo: facts.repo.clone(),
                     setting: setting.clone(),
@@ -1495,35 +1496,35 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
                         .expect("auto-fix is gated to bool-valued repository settings"),
                 })
             }
-            RuleKind::RepoSettingMatch { setting, .. } => FixPlan::Rejected {
+            RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, .. }) => FixPlan::Rejected {
                 reason: format!(
                     "automatic fixes for repository setting `{}` are not enabled",
                     setting.name()
                 ),
             },
-            RuleKind::WorkflowActionsPinnedToSha => plan_workflow_pin_pull_request(facts),
-            RuleKind::RulesetRequiresLinearHistory => {
+            RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha) => plan_workflow_pin_pull_request(facts),
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresLinearHistory) => {
                 plan_add_ruleset_rule(facts, RulesetRuleType::RequiredLinearHistory)
             }
-            RuleKind::RulesetRestrictsDeletions => {
+            RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions) => {
                 plan_add_ruleset_rule(facts, RulesetRuleType::Deletion)
             }
-            RuleKind::RulesetRequiresSignedCommits => {
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits) => {
                 plan_add_ruleset_rule(facts, RulesetRuleType::RequiredSignatures)
             }
-            RuleKind::RulesetRequiresPullRequest => {
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest) => {
                 plan_add_ruleset_rule(facts, RulesetRuleType::PullRequest)
             }
-            RuleKind::RulesetRestrictsMergeMethods { allowed } => {
+            RuleKind::Ruleset(RulesetCheck::RulesetRestrictsMergeMethods { allowed }) => {
                 plan_set_pull_request_merge_methods(facts, allowed)
             }
-            RuleKind::RulesetRequiresStrictStatusChecks => {
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks) => {
                 plan_set_strict_required_status_checks(facts)
             }
-            RuleKind::RulesetRequiresStatusCheck { check_name, source } => {
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresStatusCheck { check_name, source }) => {
                 plan_ensure_required_status_check(facts, check_name, source)
             }
-            RuleKind::FileExists { path } if path == ENVRC_PATH => {
+            RuleKind::File(FileCheck::FileExists { path }) if path == ENVRC_PATH => {
                 FixPlan::Effect(FixEffect::OpenAddEnvrcPullRequest {
                     plan: AddEnvrcPullRequestPlan {
                         repo: facts.repo.clone(),
@@ -1531,10 +1532,10 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
                     },
                 })
             }
-            RuleKind::UsesRulesetsNotLegacyProtection => {
+            RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection) => {
                 plan_delete_legacy_branch_protection(facts)
             }
-            RuleKind::RulesetExists => plan_create_default_branch_ruleset(facts),
+            RuleKind::Ruleset(RulesetCheck::RulesetExists) => plan_create_default_branch_ruleset(facts),
             _ => FixPlan::Rejected {
                 reason: "automatic fixes for this rule are not implemented yet".to_owned(),
             },
@@ -2334,7 +2335,7 @@ mod tests {
         let rules = vec![Rule::new(
             "RS001",
             "Rulesets exist",
-            RuleKind::RulesetExists,
+            RuleKind::Ruleset(RulesetCheck::RulesetExists),
         )];
         let fixes = plan_repo_fixes(&rules, &facts);
 
@@ -2359,7 +2360,7 @@ mod tests {
         let rules = vec![Rule::new(
             "RS001",
             "Rulesets exist",
-            RuleKind::RulesetExists,
+            RuleKind::Ruleset(RulesetCheck::RulesetExists),
         )];
         let fixes = plan_repo_fixes(&rules, &facts);
 
@@ -2373,10 +2374,10 @@ mod tests {
         let rules = vec![Rule::new(
             "ST999",
             "Repository is private",
-            RuleKind::RepoSettingMatch {
+            RuleKind::Setting(SettingCheck::RepoSettingMatch {
                 setting: RepoSetting::Private,
                 expected: SettingValue::Bool(true),
-            },
+            }),
         )];
         let fixes = plan_repo_fixes(&rules, &facts);
 
@@ -2439,7 +2440,7 @@ mod tests {
             &[Rule::new(
                 "WF002",
                 "Workflow actions are pinned to commit SHAs",
-                RuleKind::WorkflowActionsPinnedToSha,
+                RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
             )],
             &facts,
         );
@@ -2464,7 +2465,7 @@ mod tests {
             &[Rule::new(
                 "WF002",
                 "Workflow actions are pinned to commit SHAs",
-                RuleKind::WorkflowActionsPinnedToSha,
+                RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
             )],
             &facts,
         );
@@ -2492,7 +2493,7 @@ mod tests {
             &[Rule::new(
                 "WF002",
                 "Workflow actions are pinned to commit SHAs",
-                RuleKind::WorkflowActionsPinnedToSha,
+                RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
             )],
             &facts,
         );
@@ -2521,7 +2522,7 @@ mod tests {
             &[Rule::new(
                 "WF002",
                 "Workflow actions are pinned to commit SHAs",
-                RuleKind::WorkflowActionsPinnedToSha,
+                RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
             )],
             &facts,
         );
@@ -2552,7 +2553,7 @@ mod tests {
             &[Rule::new(
                 "WF002",
                 "Workflow actions are pinned to commit SHAs",
-                RuleKind::WorkflowActionsPinnedToSha,
+                RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
             )],
             &facts,
         );
@@ -2577,7 +2578,7 @@ mod tests {
             &[Rule::new(
                 "WF002",
                 "Workflow actions are pinned to commit SHAs",
-                RuleKind::WorkflowActionsPinnedToSha,
+                RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
             )],
             &facts,
         );
@@ -2788,7 +2789,7 @@ mod tests {
         let rules = vec![Rule::new(
             "WF002",
             "Workflow actions are pinned to commit SHAs",
-            RuleKind::WorkflowActionsPinnedToSha,
+            RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
         )];
         let fixes = plan_repo_fixes(&rules, &facts);
         let resolved_sha = "0123456789abcdef0123456789abcdef01234567";
@@ -2902,7 +2903,7 @@ mod tests {
         let rules = vec![Rule::new(
             "WF002",
             "Workflow actions are pinned to commit SHAs",
-            RuleKind::WorkflowActionsPinnedToSha,
+            RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
         )];
         let fixes = plan_repo_fixes(&rules, &facts);
         let resolved_sha = "0123456789abcdef0123456789abcdef01234567";
@@ -2999,7 +3000,7 @@ mod tests {
         let rules = vec![Rule::new(
             "WF002",
             "Workflow actions are pinned to commit SHAs",
-            RuleKind::WorkflowActionsPinnedToSha,
+            RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
         )];
         let fixes = plan_repo_fixes(&rules, &facts);
         let resolved_sha = "0123456789abcdef0123456789abcdef01234567";
@@ -3131,7 +3132,7 @@ mod tests {
         Rule::new(
             "RS005",
             "Rulesets require linear history",
-            RuleKind::RulesetRequiresLinearHistory,
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresLinearHistory),
         )
     }
 
@@ -3371,9 +3372,9 @@ mod tests {
         Rule::new(
             "RS011",
             "Pull-request rule allows only squash merges",
-            RuleKind::RulesetRestrictsMergeMethods {
+            RuleKind::Ruleset(RulesetCheck::RulesetRestrictsMergeMethods {
                 allowed: vec![MergeMethod::Squash],
-            },
+            }),
         )
     }
 
@@ -3381,7 +3382,7 @@ mod tests {
         Rule::new(
             "RS010",
             "Rulesets require a pull request",
-            RuleKind::RulesetRequiresPullRequest,
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest),
         )
     }
 
@@ -3669,7 +3670,7 @@ mod tests {
         Rule::new(
             "RS013",
             "Branches must be up-to-date before merging",
-            RuleKind::RulesetRequiresStrictStatusChecks,
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks),
         )
     }
 
@@ -3947,10 +3948,10 @@ mod tests {
         Rule::new(
             "RS012",
             "all-required-checks-complete status check is required from GitHub Actions",
-            RuleKind::RulesetRequiresStatusCheck {
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresStatusCheck {
                 check_name: "all-required-checks-complete".to_owned(),
                 source: RequiredCheckSource::GitHubActions,
-            },
+            }),
         )
     }
 
@@ -4319,12 +4320,12 @@ mod tests {
         Rule::new(
             "ST007",
             "Fork PR workflows require approval for all external contributors",
-            RuleKind::RepoSettingMatch {
+            RuleKind::Setting(SettingCheck::RepoSettingMatch {
                 setting: RepoSetting::ForkPrApprovalPolicy,
                 expected: SettingValue::ForkPrApprovalPolicy(Some(
                     ForkPrApprovalPolicy::AllExternalContributors,
                 )),
-            },
+            }),
         )
     }
 
@@ -4399,7 +4400,7 @@ mod tests {
         Rule::new(
             "RS007",
             "Repository uses rulesets instead of legacy protection",
-            RuleKind::UsesRulesetsNotLegacyProtection,
+            RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection),
         )
     }
 
@@ -4543,7 +4544,7 @@ mod tests {
     }
 
     fn rs001_rule() -> Rule {
-        Rule::new("RS001", "Rulesets exist", RuleKind::RulesetExists)
+        Rule::new("RS001", "Rulesets exist", RuleKind::Ruleset(RulesetCheck::RulesetExists))
     }
 
     #[test]
@@ -4789,9 +4790,9 @@ mod tests {
         Rule::new(
             "FL001",
             "`.envrc` exists",
-            RuleKind::FileExists {
+            RuleKind::File(FileCheck::FileExists {
                 path: ENVRC_PATH.to_owned(),
-            },
+            }),
         )
     }
 
@@ -4835,9 +4836,9 @@ mod tests {
         let rule = Rule::new(
             "FL999",
             "`CODEOWNERS` exists",
-            RuleKind::FileExists {
+            RuleKind::File(FileCheck::FileExists {
                 path: "CODEOWNERS".to_owned(),
-            },
+            }),
         );
 
         let fixes = plan_repo_fixes(&[rule], &facts);
