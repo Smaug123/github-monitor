@@ -191,6 +191,18 @@ fn ref_name_pattern_matches(pattern: &str, branch: &str) -> bool {
     match pattern {
         "~DEFAULT_BRANCH" => true,
         "~ALL" => true,
+        // GitHub returns fully-qualified ref patterns in ruleset conditions
+        // (e.g. `refs/heads/main`, `refs/heads/release/*`), so match those
+        // against the fully-qualified ref `refs/heads/{branch}`. Matching them
+        // against the bare branch name would both false-fail a hand-created
+        // `refs/heads/main` ruleset and, worse, false-pass an
+        // `exclude: refs/heads/main` (the exclude never matches, so the branch
+        // looks covered).
+        _ if pattern.starts_with("refs/") => {
+            branch_pattern_matches(pattern, &format!("refs/heads/{branch}"))
+        }
+        // Be liberal in what we accept: hand-written configs and older snapshots
+        // may carry bare branch patterns, so match those against the bare name.
         _ => branch_pattern_matches(pattern, branch),
     }
 }
