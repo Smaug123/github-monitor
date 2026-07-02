@@ -1840,6 +1840,126 @@ fn wf006_ignores_outputs_secrets_member_access() {
 }
 
 #[test]
+fn wf006_fails_for_tojson_secrets_dump() {
+    // `${{ toJSON(secrets) }}` exfiltrates every secret without any `secrets.`
+    // member access, so the dot-only scan used to miss it entirely.
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: echo '${{ toJSON(secrets) }}'\n",
+    )];
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn wf006_fails_for_dynamic_secret_index() {
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - run: echo ${{ secrets[github.event.pull_request.title] }}\n",
+    )];
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn wf006_fails_for_reusable_job_secrets_inherit() {
+    // A reusable-workflow call with `secrets: inherit` forwards every secret to
+    // the callee without any `secrets.` expression appearing in the YAML.
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  call:\n    \
+         uses: ./.github/workflows/reusable.yml\n    secrets: inherit\n",
+    )];
+
+    let RuleResult::Fail { reason } = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+        &facts,
+    ) else {
+        panic!("expected Fail");
+    };
+    assert!(reason.contains("inherit"), "{reason}");
+}
+
+#[test]
+fn wf006_passes_for_quoted_secrets_literal() {
+    // The literal string 'secrets' in an expression is data, not secret access.
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - if: ${{ contains(github.event.pull_request.title, 'secrets') }}\n        \
+         run: echo hi\n",
+    )];
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
+        RuleResult::Pass,
+    );
+}
+
+#[test]
+fn wf006_passes_for_non_reusable_secrets_inherit_mapping() {
+    // A mapping literally named `secrets` with value `inherit` that is *not* a
+    // reusable-workflow call (no sibling `uses:`) has no GitHub Actions meaning.
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\nenv:\n  secrets: inherit\njobs:\n  test:\n    \
+         runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n",
+    )];
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
+        RuleResult::Pass,
+    );
+}
+
+#[test]
+fn wf006_passes_for_step_with_block_named_uses_and_secrets() {
+    // `secrets: inherit` only has meaning on a `jobs.<job>` reusable call. A step
+    // input mapping that happens to have `uses` and `secrets` keys must not be
+    // flagged, which requires path context, not a context-free mapping match.
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(
+        ".github/workflows/pr.yml",
+        "name: PR\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    \
+         steps:\n      - uses: some/action@v1\n        \
+         with:\n          uses: inner\n          secrets: inherit\n",
+    )];
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
+        RuleResult::Pass,
+    );
+}
+
+#[test]
 fn wf006_skips_when_raw_yaml_unavailable_on_pr_workflow() {
     let mut facts = base_facts();
     facts.workflows = vec![WorkflowFile {

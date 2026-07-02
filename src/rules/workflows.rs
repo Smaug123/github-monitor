@@ -188,7 +188,8 @@ fn evaluate_pr_secrets(facts: &RepoFacts) -> RuleResult {
         },
         (false, _) => RuleResult::Fail {
             reason: format!(
-                "PR-triggered workflows must not reference `secrets.*`: {}",
+                "PR-triggered workflows must not access repository secrets \
+                 (`secrets.*`, `toJSON(secrets)`, `secrets: inherit`, …): {}",
                 summarize_examples(&offenders)
             ),
         },
@@ -209,7 +210,30 @@ fn collect_pr_secret_references(workflow_file: &WorkflowFile) -> PrSecretScan {
     };
     let mut refs = BTreeSet::new();
     walk_secret_references(&parsed, &mut refs);
+    collect_secrets_inherit(&parsed, &mut refs);
     PrSecretScan::Refs(refs)
+}
+
+/// Flags `jobs.<job>.secrets: inherit` on a reusable-workflow call, which
+/// forwards every secret to the callee with no `secrets.` expression in the
+/// YAML. This needs the `jobs.<job>` path — a step `with:` input or an `env:`
+/// entry that happens to be named `secrets`/`uses` must not count — so it
+/// navigates the parsed document rather than matching mappings anywhere.
+fn collect_secrets_inherit(parsed: &serde_yml::Value, refs: &mut BTreeSet<String>) {
+    let Some(jobs) = parsed.get("jobs").and_then(serde_yml::Value::as_mapping) else {
+        return;
+    };
+    for (_, job) in jobs {
+        let Some(job) = job.as_mapping() else {
+            continue;
+        };
+        let is_reusable_call = job.get("uses").is_some();
+        let inherits_secrets =
+            job.get("secrets").and_then(serde_yml::Value::as_str) == Some("inherit");
+        if is_reusable_call && inherits_secrets {
+            refs.insert("secrets: inherit".to_owned());
+        }
+    }
 }
 
 fn walk_secret_references(value: &serde_yml::Value, refs: &mut BTreeSet<String>) {
