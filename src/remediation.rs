@@ -638,19 +638,27 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
             FixEffect::SetRulesetPullRequestMergeMethods {
                 target, allowed, ..
             } => {
-                enqueue_set_pull_request_merge_methods(
-                    &mut queued_ruleset_updates,
-                    fix.rule_id.clone(),
-                    target.clone(),
-                    allowed.clone(),
-                );
+                if internal_error.is_none()
+                    && let Some(reason) = enqueue_set_pull_request_merge_methods(
+                        &mut queued_ruleset_updates,
+                        fix.rule_id.clone(),
+                        target.clone(),
+                        allowed.clone(),
+                    )
+                {
+                    internal_error = Some(reason);
+                }
             }
             FixEffect::SetRulesetStrictRequiredStatusChecks { target, .. } => {
-                enqueue_set_strict_required_status_checks(
-                    &mut queued_ruleset_updates,
-                    fix.rule_id.clone(),
-                    target.clone(),
-                );
+                if internal_error.is_none()
+                    && let Some(reason) = enqueue_set_strict_required_status_checks(
+                        &mut queued_ruleset_updates,
+                        fix.rule_id.clone(),
+                        target.clone(),
+                    )
+                {
+                    internal_error = Some(reason);
+                }
             }
             FixEffect::EnsureRulesetRequiredStatusCheck {
                 target,
@@ -658,13 +666,17 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 source,
                 ..
             } => {
-                enqueue_ensure_required_status_check(
-                    &mut queued_ruleset_updates,
-                    fix.rule_id.clone(),
-                    target.clone(),
-                    context.clone(),
-                    source.clone(),
-                );
+                if internal_error.is_none()
+                    && let Some(reason) = enqueue_ensure_required_status_check(
+                        &mut queued_ruleset_updates,
+                        fix.rule_id.clone(),
+                        target.clone(),
+                        context.clone(),
+                        source.clone(),
+                    )
+                {
+                    internal_error = Some(reason);
+                }
             }
             FixEffect::SetForkPrApprovalPolicy { policy, .. } => {
                 fork_pr_approval_policy_to_apply = Some(policy.clone());
@@ -673,11 +685,15 @@ fn execute_planned_effects(client: &mut GitHubClient, fixes: &[PlannedFix]) -> R
                 legacy_branch_protection_to_delete = Some(branch.clone());
             }
             FixEffect::CreateDefaultBranchRuleset { target, .. } => {
-                enqueue_ruleset_creation(
-                    &mut queued_ruleset_updates,
-                    fix.rule_id.clone(),
-                    target.clone(),
-                );
+                if internal_error.is_none()
+                    && let Some(reason) = enqueue_ruleset_creation(
+                        &mut queued_ruleset_updates,
+                        fix.rule_id.clone(),
+                        target.clone(),
+                    )
+                {
+                    internal_error = Some(reason);
+                }
             }
         }
     }
@@ -869,54 +885,68 @@ fn enqueue_ruleset_update(
     }
 }
 
+/// Records a pull-request merge-method update for `target`. Returns
+/// `Some(reason)` when an incompatible update was already queued for the same
+/// ruleset; in that case the queued state is left untouched rather than
+/// silently overwritten (see the module note on release-reachable conflicts).
 fn enqueue_set_pull_request_merge_methods(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
     target: PlannedRulesetTarget,
     allowed: Vec<MergeMethod>,
-) {
+) -> Option<String> {
     if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
-        debug_assert!(
-            existing.set_pull_request_allowed_merge_methods.is_none(),
-            "duplicate pull-request merge-method update for ruleset `{}`",
-            target.name(),
-        );
+        if existing.set_pull_request_allowed_merge_methods.is_some() {
+            return Some(format!(
+                "internal error: duplicate pull-request merge-method update for ruleset `{}`",
+                target.name(),
+            ));
+        }
         existing.set_pull_request_allowed_merge_methods = Some(allowed);
     } else {
         let mut entry = empty_queued_ruleset_update(target, rule_id);
         entry.set_pull_request_allowed_merge_methods = Some(allowed);
         queue.push(entry);
     }
+    None
 }
 
+/// Records a strict-required-status-checks update for `target`. Returns
+/// `Some(reason)` when one was already queued for the same ruleset.
 fn enqueue_set_strict_required_status_checks(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
     target: PlannedRulesetTarget,
-) {
+) -> Option<String> {
     if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
-        debug_assert!(
-            existing.set_strict_required_status_checks.is_none(),
-            "duplicate strict-required-status-checks update for ruleset `{}`",
-            target.name(),
-        );
+        if existing.set_strict_required_status_checks.is_some() {
+            return Some(format!(
+                "internal error: duplicate strict-required-status-checks update for ruleset `{}`",
+                target.name(),
+            ));
+        }
         existing.set_strict_required_status_checks = Some(true);
     } else {
         let mut entry = empty_queued_ruleset_update(target, rule_id);
         entry.set_strict_required_status_checks = Some(true);
         queue.push(entry);
     }
+    None
 }
 
+/// Ensures a required status check for `context` is queued on `target`. A
+/// second request for the same context with the *same* source is a no-op
+/// (deduplicated); a request with a *conflicting* source returns `Some(reason)`
+/// without dropping either source silently.
 fn enqueue_ensure_required_status_check(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
     target: PlannedRulesetTarget,
     context: String,
     source: RequiredCheckSource,
-) {
+) -> Option<String> {
     let check = PlannedRequiredStatusCheck { context, source };
     if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
@@ -926,12 +956,15 @@ fn enqueue_ensure_required_status_check(
             .find(|queued| queued.context == check.context)
             .map(|queued| queued.source.clone());
         match already_queued {
-            Some(queued_source) => debug_assert!(
-                queued_source == check.source,
-                "conflicting required-status-check sources for context `{}` on ruleset `{}`",
-                check.context,
-                target.name(),
-            ),
+            Some(queued_source) => {
+                if queued_source != check.source {
+                    return Some(format!(
+                        "internal error: conflicting required-status-check sources for context `{}` on ruleset `{}`",
+                        check.context,
+                        target.name(),
+                    ));
+                }
+            }
             None => existing.required_status_checks_to_add.push(check),
         }
     } else {
@@ -939,26 +972,31 @@ fn enqueue_ensure_required_status_check(
         entry.required_status_checks_to_add.push(check);
         queue.push(entry);
     }
+    None
 }
 
+/// Records that `target` should be created. Returns `Some(reason)` when
+/// creation was already queued for the same target.
 fn enqueue_ruleset_creation(
     queue: &mut Vec<QueuedRulesetUpdate>,
     rule_id: RuleId,
     target: PlannedRulesetTarget,
-) {
+) -> Option<String> {
     if let Some(existing) = queued_ruleset_entry_mut(queue, &target) {
         existing.rule_ids.push(rule_id);
-        debug_assert!(
-            !existing.create,
-            "duplicate ruleset creation for target `{}`",
-            target.name(),
-        );
+        if existing.create {
+            return Some(format!(
+                "internal error: duplicate ruleset creation for target `{}`",
+                target.name(),
+            ));
+        }
         existing.create = true;
     } else {
         let mut entry = empty_queued_ruleset_update(target, rule_id);
         entry.create = true;
         queue.push(entry);
     }
+    None
 }
 
 fn apply_ruleset_update(
@@ -5145,5 +5183,190 @@ mod tests {
             path,
             body: String::from_utf8(body).unwrap(),
         }
+    }
+
+    fn existing_ruleset_target() -> PlannedRulesetTarget {
+        PlannedRulesetTarget::Existing {
+            id: 42,
+            name: "protect-main".to_owned(),
+        }
+    }
+
+    // These conflicts were previously guarded by `debug_assert!`, which is
+    // compiled out of release builds — the release code then silently
+    // overwrote or dropped the second update. They must instead surface an
+    // internal error so `execute_planned_effects` fails the affected fixes
+    // rather than shipping a corrupted ruleset update.
+
+    #[test]
+    fn enqueue_merge_methods_reports_duplicate_without_overwriting() {
+        let mut queue = Vec::new();
+        assert!(
+            enqueue_set_pull_request_merge_methods(
+                &mut queue,
+                RuleId::new("RS010"),
+                existing_ruleset_target(),
+                vec![MergeMethod::Squash],
+            )
+            .is_none()
+        );
+
+        let reason = enqueue_set_pull_request_merge_methods(
+            &mut queue,
+            RuleId::new("RS011"),
+            existing_ruleset_target(),
+            vec![MergeMethod::Merge],
+        )
+        .expect("second merge-method update for the same ruleset should conflict");
+        assert!(
+            reason.contains("duplicate pull-request merge-method"),
+            "unexpected reason: {reason}"
+        );
+
+        // The first update survives; the second is not silently applied.
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue[0].set_pull_request_allowed_merge_methods,
+            Some(vec![MergeMethod::Squash]),
+        );
+    }
+
+    #[test]
+    fn enqueue_strict_required_status_checks_reports_duplicate() {
+        let mut queue = Vec::new();
+        assert!(
+            enqueue_set_strict_required_status_checks(
+                &mut queue,
+                RuleId::new("RS020"),
+                existing_ruleset_target(),
+            )
+            .is_none()
+        );
+
+        let reason = enqueue_set_strict_required_status_checks(
+            &mut queue,
+            RuleId::new("RS021"),
+            existing_ruleset_target(),
+        )
+        .expect("second strict-required-status-checks update should conflict");
+        assert!(
+            reason.contains("duplicate strict-required-status-checks"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn enqueue_required_status_check_reports_conflicting_source() {
+        let mut queue = Vec::new();
+        assert!(
+            enqueue_ensure_required_status_check(
+                &mut queue,
+                RuleId::new("RS030"),
+                existing_ruleset_target(),
+                "build".to_owned(),
+                RequiredCheckSource::GitHubActions,
+            )
+            .is_none()
+        );
+
+        let reason = enqueue_ensure_required_status_check(
+            &mut queue,
+            RuleId::new("RS031"),
+            existing_ruleset_target(),
+            "build".to_owned(),
+            RequiredCheckSource::Any,
+        )
+        .expect("same context with a different source should conflict");
+        assert!(
+            reason.contains("conflicting required-status-check sources"),
+            "unexpected reason: {reason}"
+        );
+
+        // Neither source is silently dropped in favour of the other: the
+        // originally queued check is preserved unchanged.
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].required_status_checks_to_add.len(), 1);
+        assert_eq!(
+            queue[0].required_status_checks_to_add[0].source,
+            RequiredCheckSource::GitHubActions,
+        );
+    }
+
+    #[test]
+    fn enqueue_required_status_check_dedups_matching_source() {
+        let mut queue = Vec::new();
+        assert!(
+            enqueue_ensure_required_status_check(
+                &mut queue,
+                RuleId::new("RS030"),
+                existing_ruleset_target(),
+                "build".to_owned(),
+                RequiredCheckSource::GitHubActions,
+            )
+            .is_none()
+        );
+
+        // Same context and same source is a legitimate no-op, not a conflict.
+        assert!(
+            enqueue_ensure_required_status_check(
+                &mut queue,
+                RuleId::new("RS031"),
+                existing_ruleset_target(),
+                "build".to_owned(),
+                RequiredCheckSource::GitHubActions,
+            )
+            .is_none()
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].required_status_checks_to_add.len(), 1);
+    }
+
+    #[test]
+    fn enqueue_ruleset_creation_reports_duplicate() {
+        let mut queue = Vec::new();
+        assert!(
+            enqueue_ruleset_creation(&mut queue, RuleId::new("RS001"), existing_ruleset_target())
+                .is_none()
+        );
+
+        let reason =
+            enqueue_ruleset_creation(&mut queue, RuleId::new("RS001"), existing_ruleset_target())
+                .expect("second creation for the same target should conflict");
+        assert!(
+            reason.contains("duplicate ruleset creation"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn enqueue_updates_to_distinct_targets_do_not_conflict() {
+        let mut queue = Vec::new();
+        let first = PlannedRulesetTarget::Existing {
+            id: 1,
+            name: "one".to_owned(),
+        };
+        let second = PlannedRulesetTarget::Existing {
+            id: 2,
+            name: "two".to_owned(),
+        };
+        assert!(
+            enqueue_set_pull_request_merge_methods(
+                &mut queue,
+                RuleId::new("RS010"),
+                first,
+                vec![MergeMethod::Squash],
+            )
+            .is_none()
+        );
+        assert!(
+            enqueue_set_pull_request_merge_methods(
+                &mut queue,
+                RuleId::new("RS011"),
+                second,
+                vec![MergeMethod::Merge],
+            )
+            .is_none()
+        );
+        assert_eq!(queue.len(), 2);
     }
 }
