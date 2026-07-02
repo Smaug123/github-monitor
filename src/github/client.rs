@@ -22,7 +22,7 @@ use crate::github::types::{
     RepositoryDirectoryEntry, RepositoryFileContent, RepositoryUpdate, Ruleset,
     UpdateRepositoryFile, UpdateRulesetRequest, WorkflowPermissions,
 };
-use crate::types::{BranchName, RepoRef};
+use crate::types::{BranchName, Gathered, RepoRef};
 
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 pub(crate) const GITHUB_API_VERSION: &str = "2022-11-28";
@@ -258,17 +258,25 @@ impl GitHubClient {
         Ok(())
     }
 
+    /// Reads the fork-PR contributor-approval policy. GitHub documents only 200
+    /// and 404 for this endpoint, and a 200 always carries a policy, so a 404
+    /// never means "policy unset" — it means the resource is not accessible (the
+    /// token lacks the permission to read it). We therefore surface a 404 as
+    /// [`Gathered::Unknown`], never as a definite absence; the rule layer turns
+    /// that into an `Error` rather than a spurious non-compliance verdict.
     pub fn get_fork_pr_approval_permission(
         &mut self,
         repo: &RepoRef,
-    ) -> Result<Option<ForkPrApprovalPermission>, GitHubClientError> {
-        self.get_json_optional(
-            repo,
-            &format!(
-                "{}/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
-                self.api_base_url
-            ),
-        )
+    ) -> Result<Gathered<ForkPrApprovalPolicy>, GitHubClientError> {
+        let url = format!(
+            "{}/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
+            self.api_base_url
+        );
+        match self.get_json::<ForkPrApprovalPermission>(repo, &url) {
+            Ok(permission) => Ok(Gathered::Present(permission.approval_policy)),
+            Err(GitHubClientError::UnexpectedStatus { status: 404, .. }) => Ok(Gathered::Unknown),
+            Err(other) => Err(other),
+        }
     }
 
     pub fn get_workflow_permissions(
@@ -1281,6 +1289,71 @@ mod tests {
             Some(crate::github::types::LegacyEnabledFlag { enabled: true })
         );
         assert!(protection.required_status_checks.is_none());
+    }
+
+    #[test]
+    fn get_fork_pr_approval_permission_returns_unknown_for_404() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/actions/permissions/fork-pr-contributor-approval",
+            404,
+            r#"{"message":"Not Found"}"#,
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let policy = client
+            .get_fork_pr_approval_permission(&RepoRef::new("owner", "repo"))
+            .unwrap();
+
+        // A 404 means "not readable", never "policy unset": it must be Unknown so
+        // the rule layer errors instead of reporting a spurious non-compliance.
+        assert_eq!(policy, Gathered::Unknown);
+    }
+
+    #[test]
+    fn get_fork_pr_approval_permission_returns_present_for_200() {
+        let server = TestServer::spawn(vec![ExpectedRequest::new(
+            "GET",
+            "/repos/owner/repo/actions/permissions/fork-pr-contributor-approval",
+            200,
+            r#"{"approval_policy":"all_external_contributors"}"#,
+        )]);
+        let mut client = GitHubClient::with_base_url(GitHubToken::new("token"), server.base_url());
+
+        let policy = client
+            .get_fork_pr_approval_permission(&RepoRef::new("owner", "repo"))
+            .unwrap();
+
+        assert_eq!(
+            policy,
+            Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires GITHUB_TOKEN and GITHUB_FORK_PR_UNREADABLE_REPO"]
+    fn fork_pr_approval_permission_is_unknown_for_unreadable_repo() {
+        // Confirms the live contract the fix relies on — 404 -> Unknown, never
+        // Absent and never an abort. Deliberately not hardcoded to a third party's
+        // repo: point GITHUB_FORK_PR_UNREADABLE_REPO at a repo *you* choose whose
+        // fork-PR policy your token cannot read (e.g. one of your own repos via a
+        // deliberately under-scoped token). If this returns `Err` (a non-404 such
+        // as 403), the mapping in `get_fork_pr_approval_permission` must cover it.
+        let token = GitHubToken::from_env("GITHUB_TOKEN").expect("GITHUB_TOKEN must be set");
+        let spec = std::env::var("GITHUB_FORK_PR_UNREADABLE_REPO").expect(
+            "set GITHUB_FORK_PR_UNREADABLE_REPO=owner/name to a repo whose fork-PR policy \
+             your token cannot read",
+        );
+        let (owner, name) = spec
+            .split_once('/')
+            .expect("GITHUB_FORK_PR_UNREADABLE_REPO must be owner/name");
+        let mut client = GitHubClient::new(token);
+
+        let policy = client
+            .get_fork_pr_approval_permission(&RepoRef::new(owner, name))
+            .unwrap();
+
+        assert_eq!(policy, Gathered::Unknown);
     }
 
     #[test]

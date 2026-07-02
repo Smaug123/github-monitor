@@ -6,7 +6,7 @@ pub(super) fn evaluate(kind: &RuleKind, facts: &RepoFacts) -> RuleResult {
     match kind {
         RuleKind::RepoSettingMatch { setting, expected } => {
             let actual = setting.read(&facts.settings);
-            if let SettingValue::UnknownBool = actual {
+            if let SettingValue::Unknown = actual {
                 return RuleResult::Error {
                     reason: format!(
                         "repository setting `{}` was not reported by GitHub; the token may lack \

@@ -4,7 +4,7 @@ use crate::facts::{RepoFacts, RepoSettings};
 use crate::github::types::{
     DefaultWorkflowPermissions, ForkPrApprovalPolicy, GITHUB_ACTIONS_INTEGRATION_ID, MergeMethod,
 };
-use crate::types::RuleId;
+use crate::types::{Gathered, RuleId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepoSetting {
@@ -69,9 +69,13 @@ impl RepoSetting {
             Self::AllowRebaseMerge => {
                 SettingValue::from_optional_bool(settings.allow_rebase_merge)
             }
-            Self::ForkPrApprovalPolicy => SettingValue::ForkPrApprovalPolicy(
-                settings.fork_pr_approval_policy.as_option().cloned(),
-            ),
+            Self::ForkPrApprovalPolicy => match &settings.fork_pr_approval_policy {
+                Gathered::Present(policy) => {
+                    SettingValue::ForkPrApprovalPolicy(Some(policy.clone()))
+                }
+                Gathered::Absent => SettingValue::ForkPrApprovalPolicy(None),
+                Gathered::Unknown => SettingValue::Unknown,
+            },
             Self::DefaultWorkflowPermissions => SettingValue::DefaultWorkflowPermissions(
                 settings.default_workflow_permissions.clone(),
             ),
@@ -82,11 +86,12 @@ impl RepoSetting {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SettingValue {
     Bool(bool),
-    /// A boolean setting GitHub did not report (the token lacks permission to read
-    /// it). Distinct from `Bool(false)`: a rule that reads it must `Error`, never
-    /// pass or fail vacuously. Only ever produced by reading actual facts; rule
-    /// expectations are always concrete.
-    UnknownBool,
+    /// A setting whose value could not be determined (the token lacks permission,
+    /// so GitHub omitted the field or 404'd the endpoint). Distinct from any
+    /// concrete value: a rule that reads it must `Error`, never pass or fail
+    /// vacuously. Only ever produced by reading actual facts; rule expectations
+    /// are always concrete.
+    Unknown,
     ForkPrApprovalPolicy(Option<ForkPrApprovalPolicy>),
     DefaultWorkflowPermissions(DefaultWorkflowPermissions),
 }
@@ -95,14 +100,14 @@ impl SettingValue {
     pub(super) fn from_optional_bool(value: Option<bool>) -> Self {
         match value {
             Some(value) => Self::Bool(value),
-            None => Self::UnknownBool,
+            None => Self::Unknown,
         }
     }
 
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Bool(value) => value.to_string(),
-            Self::UnknownBool => "unknown (not reported by GitHub)".to_owned(),
+            Self::Unknown => "unknown (not reported by GitHub)".to_owned(),
             Self::ForkPrApprovalPolicy(Some(policy)) => String::from(policy.clone()),
             Self::ForkPrApprovalPolicy(None) => "unknown".to_owned(),
             Self::DefaultWorkflowPermissions(value) => String::from(value.clone()),
@@ -112,7 +117,7 @@ impl SettingValue {
     pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
-            Self::UnknownBool
+            Self::Unknown
             | Self::ForkPrApprovalPolicy(_)
             | Self::DefaultWorkflowPermissions(_) => None,
         }

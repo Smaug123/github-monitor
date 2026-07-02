@@ -2103,7 +2103,8 @@ fn summarize_examples(values: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::config::{RepoConfig, Visibility};
-    use crate::facts::{Gathered, RepoSettings, WorkflowFile};
+    use crate::facts::{RepoSettings, WorkflowFile};
+    use crate::types::Gathered;
     use crate::rules::{RepoSetting, Rule, SettingValue, rules_for_repo};
     use crate::workflow::model::{
         ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step, StepKind, Triggers,
