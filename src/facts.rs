@@ -411,9 +411,10 @@ impl std::error::Error for SnapshotError {
 mod tests {
     use super::*;
     use crate::github::types::{
-        BranchProtection, BypassActor, BypassActorType, BypassMode, MergeMethod, RefNameCondition,
-        RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
-        RulesetRuleParameters, RulesetRuleType, RulesetTarget,
+        BranchProtection, BypassActor, BypassActorType, BypassMode, MergeMethod,
+        PullRequestParameters, RefNameCondition, RequiredStatusCheck,
+        RequiredStatusChecksParameters, Ruleset, RulesetConditions, RulesetEnforcement,
+        RulesetRule, RulesetRuleType, RulesetTarget,
     };
     use crate::workflow::model::{
         ActionRef, ActionReference, ActionStep, Job, JobKind, RunStep, StandardJob, Step, StepKind,
@@ -544,19 +545,6 @@ mod tests {
             })
     }
 
-    fn ruleset_rule_type_strategy() -> impl Strategy<Value = RulesetRuleType> {
-        prop_oneof![
-            Just(RulesetRuleType::Creation),
-            Just(RulesetRuleType::Update),
-            Just(RulesetRuleType::Deletion),
-            Just(RulesetRuleType::RequiredLinearHistory),
-            Just(RulesetRuleType::RequiredSignatures),
-            Just(RulesetRuleType::PullRequest),
-            Just(RulesetRuleType::RequiredStatusChecks),
-            Just(RulesetRuleType::NonFastForward),
-        ]
-    }
-
     fn required_status_check_strategy() -> impl Strategy<Value = RequiredStatusCheck> {
         (text(), proptest::option::of(any::<u64>())).prop_map(|(context, integration_id)| {
             RequiredStatusCheck {
@@ -590,52 +578,88 @@ mod tests {
         .prop_map(|map| map.into_iter().collect())
     }
 
-    fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParameters> {
+    fn pull_request_parameters_strategy() -> impl Strategy<Value = PullRequestParameters> {
         (
-            proptest::collection::vec(required_status_check_strategy(), 0..3),
-            proptest::option::of(any::<bool>()),
-            proptest::option::of(0_u32..5),
-            proptest::option::of(any::<bool>()),
-            proptest::option::of(any::<bool>()),
-            proptest::option::of(any::<bool>()),
-            proptest::option::of(any::<bool>()),
-            proptest::option::of(any::<bool>()),
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            0_u32..5,
+            any::<bool>(),
             proptest::collection::vec(merge_method_strategy(), 0..4),
             ruleset_extra_parameters_strategy(),
         )
             .prop_map(
                 |(
-                    required_status_checks,
-                    strict_required_status_checks_policy,
-                    required_approving_review_count,
+                    dismiss_stale_reviews_on_push,
                     require_code_owner_review,
                     require_last_push_approval,
+                    required_approving_review_count,
                     required_review_thread_resolution,
-                    dismiss_stale_reviews_on_push,
-                    do_not_enforce_on_create,
                     allowed_merge_methods,
                     extra,
-                )| RulesetRuleParameters {
-                    required_status_checks,
-                    strict_required_status_checks_policy,
-                    required_approving_review_count,
+                )| PullRequestParameters {
+                    dismiss_stale_reviews_on_push,
                     require_code_owner_review,
                     require_last_push_approval,
+                    required_approving_review_count,
                     required_review_thread_resolution,
-                    dismiss_stale_reviews_on_push,
-                    do_not_enforce_on_create,
                     allowed_merge_methods,
                     extra,
                 },
             )
     }
 
-    fn ruleset_rule_strategy() -> impl Strategy<Value = RulesetRule> {
+    fn required_status_checks_parameters_strategy()
+    -> impl Strategy<Value = RequiredStatusChecksParameters> {
         (
-            ruleset_rule_type_strategy(),
-            proptest::option::of(ruleset_rule_parameters_strategy()),
+            proptest::collection::vec(required_status_check_strategy(), 0..3),
+            any::<bool>(),
+            proptest::option::of(any::<bool>()),
+            ruleset_extra_parameters_strategy(),
         )
-            .prop_map(|(kind, parameters)| RulesetRule { kind, parameters })
+            .prop_map(
+                |(
+                    required_status_checks,
+                    strict_required_status_checks_policy,
+                    do_not_enforce_on_create,
+                    extra,
+                )| RequiredStatusChecksParameters {
+                    required_status_checks,
+                    strict_required_status_checks_policy,
+                    do_not_enforce_on_create,
+                    extra,
+                },
+            )
+    }
+
+    /// Rules of kinds this crate does not model as a typed variant, carrying an
+    /// arbitrary `parameters` object. Kinds are drawn from real-but-unmodeled
+    /// GitHub rule types (never `pull_request`/`required_status_checks`, which
+    /// would deserialize into a typed variant and not round-trip through `Other`).
+    fn ruleset_rule_other_strategy() -> impl Strategy<Value = RulesetRule> {
+        let kind = prop_oneof![
+            Just(RulesetRuleType::Creation),
+            Just(RulesetRuleType::Deletion),
+            Just(RulesetRuleType::RequiredLinearHistory),
+            Just(RulesetRuleType::NonFastForward),
+            Just(RulesetRuleType::from("merge_queue".to_owned())),
+            Just(RulesetRuleType::from("commit_message_pattern".to_owned())),
+        ];
+        let parameters = prop_oneof![
+            Just(None),
+            ruleset_extra_parameters_strategy()
+                .prop_map(|extra| Some(serde_json::Value::Object(extra))),
+        ];
+        (kind, parameters).prop_map(|(kind, parameters)| RulesetRule::Other { kind, parameters })
+    }
+
+    fn ruleset_rule_strategy() -> impl Strategy<Value = RulesetRule> {
+        prop_oneof![
+            pull_request_parameters_strategy().prop_map(RulesetRule::PullRequest),
+            required_status_checks_parameters_strategy()
+                .prop_map(RulesetRule::RequiredStatusChecks),
+            ruleset_rule_other_strategy(),
+        ]
     }
 
     fn ref_name_condition_strategy() -> impl Strategy<Value = RefNameCondition> {
@@ -911,24 +935,17 @@ mod tests {
                     }),
                 }),
                 bypass_actors: Vec::new(),
-                rules: vec![RulesetRule {
-                    kind: RulesetRuleType::RequiredStatusChecks,
-                    parameters: Some(RulesetRuleParameters {
+                rules: vec![RulesetRule::RequiredStatusChecks(
+                    RequiredStatusChecksParameters {
                         required_status_checks: vec![RequiredStatusCheck {
                             context: "ci".to_owned(),
                             integration_id: None,
                         }],
-                        strict_required_status_checks_policy: Some(true),
-                        required_approving_review_count: None,
-                        require_code_owner_review: None,
-                        require_last_push_approval: None,
-                        required_review_thread_resolution: None,
-                        dismiss_stale_reviews_on_push: None,
+                        strict_required_status_checks_policy: true,
                         do_not_enforce_on_create: None,
-                        allowed_merge_methods: Vec::new(),
                         extra: serde_json::Map::new(),
-                    }),
-                }],
+                    },
+                )],
             }],
             default_branch: BranchName::new("main"),
             workflows: vec![WorkflowFile {

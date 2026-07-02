@@ -7,9 +7,9 @@ use crate::facts::RepoFacts;
 use crate::github::client::{GitHubClient, GitHubClientError, NonRootRepoPath};
 use crate::github::types::{
     ContentEncoding, CreateGitReference, CreatePullRequest, ForkPrApprovalPolicy, MergeMethod,
-    PullRequest, RefNameCondition, RepositoryFileContent, RepositoryUpdate, RulesetConditions,
-    RulesetEnforcement, RulesetRule, RulesetRuleParameters, RulesetRuleType, RulesetTarget,
-    UpdateRepositoryFile, UpdateRulesetRequest,
+    PullRequest, PullRequestParameters, RefNameCondition, RepositoryFileContent, RepositoryUpdate,
+    RequiredStatusChecksParameters, RulesetConditions, RulesetEnforcement, RulesetRule,
+    RulesetRuleType, RulesetTarget, UpdateRepositoryFile, UpdateRulesetRequest,
 };
 use crate::rules::{
     FileCheck, RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult,
@@ -297,7 +297,7 @@ impl FixEffect {
             Self::AddRulesetRules { target, rules, .. } => {
                 let rule_names = rules
                     .iter()
-                    .map(|rule| format!("`{}`", ruleset_rule_type_name(&rule.kind)))
+                    .map(|rule| format!("`{}`", ruleset_rule_type_name(&rule.kind())))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -873,7 +873,7 @@ fn enqueue_ruleset_update(
             if !existing
                 .rules_to_add
                 .iter()
-                .any(|existing_rule| existing_rule.kind == rule.kind)
+                .any(|existing_rule| existing_rule.kind() == rule.kind())
             {
                 existing.rules_to_add.push(rule);
             }
@@ -1086,55 +1086,22 @@ fn create_default_branch_ruleset(
 /// is identical regardless of whether the ruleset already exists.
 fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRulesetUpdate) {
     for rule in &queued.rules_to_add {
-        if !rules.iter().any(|existing| existing.kind == rule.kind) {
-            let to_push = if rule.kind == RulesetRuleType::PullRequest && rule.parameters.is_none()
-            {
-                new_pull_request_rule_with_required_defaults()
-            } else {
-                rule.clone()
-            };
-            rules.push(to_push);
+        if !rules.iter().any(|existing| existing.kind() == rule.kind()) {
+            rules.push(rule.clone());
         }
     }
 
     if let Some(allowed) = &queued.set_pull_request_allowed_merge_methods {
-        let pr_rule = match rules
-            .iter_mut()
-            .find(|rule| rule.kind == RulesetRuleType::PullRequest)
-        {
-            Some(rule) => rule,
-            None => {
-                rules.push(new_pull_request_rule_with_required_defaults());
-                rules.last_mut().expect("just pushed")
-            }
-        };
-        let params = pr_rule
-            .parameters
-            .get_or_insert_with(RulesetRuleParameters::default);
+        let params = pull_request_parameters_mut(rules);
         params.allowed_merge_methods = allowed.clone();
     }
 
     let want_strict = queued.set_strict_required_status_checks == Some(true);
     let want_checks = !queued.required_status_checks_to_add.is_empty();
     if want_strict || want_checks {
-        let status_rule = match rules
-            .iter_mut()
-            .find(|rule| rule.kind == RulesetRuleType::RequiredStatusChecks)
-        {
-            Some(rule) => rule,
-            None => {
-                rules.push(RulesetRule {
-                    kind: RulesetRuleType::RequiredStatusChecks,
-                    parameters: None,
-                });
-                rules.last_mut().expect("just pushed")
-            }
-        };
-        let params = status_rule
-            .parameters
-            .get_or_insert_with(RulesetRuleParameters::default);
+        let params = required_status_checks_parameters_mut(rules);
         if want_strict {
-            params.strict_required_status_checks_policy = Some(true);
+            params.strict_required_status_checks_policy = true;
         }
         for check in &queued.required_status_checks_to_add {
             match params
@@ -1163,22 +1130,60 @@ fn apply_queued_modifications(rules: &mut Vec<RulesetRule>, queued: &QueuedRules
     }
 }
 
+/// Returns the `pull_request` rule's parameters, adding a fresh rule with the
+/// required review defaults first if none is present.
+fn pull_request_parameters_mut(rules: &mut Vec<RulesetRule>) -> &mut PullRequestParameters {
+    if !rules
+        .iter()
+        .any(|rule| matches!(rule, RulesetRule::PullRequest(_)))
+    {
+        rules.push(new_pull_request_rule_with_required_defaults());
+    }
+    rules
+        .iter_mut()
+        .find_map(|rule| match rule {
+            RulesetRule::PullRequest(parameters) => Some(parameters),
+            _ => None,
+        })
+        .expect("a pull_request rule is present after ensuring one exists")
+}
+
+/// Returns the `required_status_checks` rule's parameters, adding a fresh
+/// (empty, non-strict) rule first if none is present.
+fn required_status_checks_parameters_mut(
+    rules: &mut Vec<RulesetRule>,
+) -> &mut RequiredStatusChecksParameters {
+    if !rules
+        .iter()
+        .any(|rule| matches!(rule, RulesetRule::RequiredStatusChecks(_)))
+    {
+        rules.push(RulesetRule::RequiredStatusChecks(
+            RequiredStatusChecksParameters::default(),
+        ));
+    }
+    rules
+        .iter_mut()
+        .find_map(|rule| match rule {
+            RulesetRule::RequiredStatusChecks(parameters) => Some(parameters),
+            _ => None,
+        })
+        .expect("a required_status_checks rule is present after ensuring one exists")
+}
+
 /// Builds a fresh `pull_request` rule with the parameters GitHub's
 /// create-ruleset endpoint requires. Sending the rule without these fields
 /// causes a 422 ("data matches no possible input"). All defaults are
 /// permissive — explicit rules (e.g. RS011) override them.
 fn new_pull_request_rule_with_required_defaults() -> RulesetRule {
-    RulesetRule {
-        kind: RulesetRuleType::PullRequest,
-        parameters: Some(RulesetRuleParameters {
-            required_approving_review_count: Some(0),
-            dismiss_stale_reviews_on_push: Some(false),
-            require_code_owner_review: Some(false),
-            require_last_push_approval: Some(false),
-            required_review_thread_resolution: Some(false),
-            ..RulesetRuleParameters::default()
-        }),
-    }
+    RulesetRule::PullRequest(PullRequestParameters {
+        required_approving_review_count: 0,
+        dismiss_stale_reviews_on_push: false,
+        require_code_owner_review: false,
+        require_last_push_approval: false,
+        required_review_thread_resolution: false,
+        allowed_merge_methods: Vec::new(),
+        extra: serde_json::Map::new(),
+    })
 }
 
 fn create_workflow_pin_pull_request(
@@ -1547,17 +1552,19 @@ fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<
             RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha) => {
                 plan_workflow_pin_pull_request(facts)
             }
-            RuleKind::Ruleset(RulesetCheck::RulesetRequiresLinearHistory) => {
-                plan_add_ruleset_rule(facts, RulesetRuleType::RequiredLinearHistory)
-            }
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresLinearHistory) => plan_add_ruleset_rule(
+                facts,
+                RulesetRule::parameterless(RulesetRuleType::RequiredLinearHistory),
+            ),
             RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions) => {
-                plan_add_ruleset_rule(facts, RulesetRuleType::Deletion)
+                plan_add_ruleset_rule(facts, RulesetRule::parameterless(RulesetRuleType::Deletion))
             }
-            RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits) => {
-                plan_add_ruleset_rule(facts, RulesetRuleType::RequiredSignatures)
-            }
+            RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits) => plan_add_ruleset_rule(
+                facts,
+                RulesetRule::parameterless(RulesetRuleType::RequiredSignatures),
+            ),
             RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest) => {
-                plan_add_ruleset_rule(facts, RulesetRuleType::PullRequest)
+                plan_add_ruleset_rule(facts, new_pull_request_rule_with_required_defaults())
             }
             RuleKind::Ruleset(RulesetCheck::RulesetRestrictsMergeMethods { allowed }) => {
                 plan_set_pull_request_merge_methods(facts, allowed)
@@ -1616,16 +1623,19 @@ fn pending_default_branch_target(facts: &RepoFacts) -> PlannedRulesetTarget {
     }
 }
 
-fn plan_add_ruleset_rule(facts: &RepoFacts, missing: RulesetRuleType) -> FixPlan {
+fn plan_add_ruleset_rule(facts: &RepoFacts, rule: RulesetRule) -> FixPlan {
+    let missing = rule.kind();
     let missing_name = ruleset_rule_type_name(&missing);
     let candidates = active_branch_rulesets_for_default_branch(facts)
-        .filter(|ruleset| !ruleset.rules.iter().any(|rule| rule.kind == missing))
+        .filter(|ruleset| {
+            !ruleset
+                .rules
+                .iter()
+                .any(|existing| existing.kind() == missing)
+        })
         .collect::<Vec<_>>();
 
-    let rules = vec![RulesetRule {
-        kind: missing,
-        parameters: None,
-    }];
+    let rules = vec![rule];
 
     match candidates.as_slice() {
         [] => FixPlan::Effect(FixEffect::AddRulesetRules {
@@ -1663,16 +1673,12 @@ fn plan_set_pull_request_merge_methods(facts: &RepoFacts, allowed: &[MergeMethod
             ruleset
                 .rules
                 .iter()
-                .find(|rule| rule.kind == RulesetRuleType::PullRequest)
-                .map(|pr_rule| {
-                    let actual = pr_rule
-                        .parameters
-                        .as_ref()
-                        .map(|parameters| {
-                            merge_method_string_set(&parameters.allowed_merge_methods)
-                        })
-                        .unwrap_or_default();
-                    actual != desired
+                .find_map(|rule| match rule {
+                    RulesetRule::PullRequest(parameters) => Some(parameters),
+                    _ => None,
+                })
+                .map(|parameters| {
+                    merge_method_string_set(&parameters.allowed_merge_methods) != desired
                 })
                 .unwrap_or(true)
         })
@@ -1718,13 +1724,12 @@ fn plan_ensure_required_status_check(
 ) -> FixPlan {
     let candidates = active_branch_rulesets_for_default_branch(facts)
         .filter(|ruleset| {
-            !ruleset.rules.iter().any(|rule| {
-                rule.kind == RulesetRuleType::RequiredStatusChecks
-                    && rule.parameters.as_ref().is_some_and(|parameters| {
-                        parameters.required_status_checks.iter().any(|check| {
-                            check.context == context && source.accepts(check.integration_id)
-                        })
-                    })
+            !ruleset.rules.iter().any(|rule| match rule {
+                RulesetRule::RequiredStatusChecks(parameters) => parameters
+                    .required_status_checks
+                    .iter()
+                    .any(|check| check.context == context && source.accepts(check.integration_id)),
+                _ => false,
             })
         })
         .collect::<Vec<_>>();
@@ -1766,14 +1771,11 @@ fn plan_set_strict_required_status_checks(facts: &RepoFacts) -> FixPlan {
             ruleset
                 .rules
                 .iter()
-                .find(|rule| rule.kind == RulesetRuleType::RequiredStatusChecks)
-                .map(|status_rule| {
-                    status_rule
-                        .parameters
-                        .as_ref()
-                        .and_then(|parameters| parameters.strict_required_status_checks_policy)
-                        != Some(true)
+                .find_map(|rule| match rule {
+                    RulesetRule::RequiredStatusChecks(parameters) => Some(parameters),
+                    _ => None,
                 })
+                .map(|parameters| !parameters.strict_required_status_checks_policy)
                 .unwrap_or(true)
         })
         .collect::<Vec<_>>();
@@ -3202,10 +3204,9 @@ mod tests {
                     id: 42,
                     name: "main protection".to_owned(),
                 },
-                rules: vec![RulesetRule {
-                    kind: RulesetRuleType::RequiredLinearHistory,
-                    parameters: None,
-                }],
+                rules: vec![RulesetRule::parameterless(
+                    RulesetRuleType::RequiredLinearHistory
+                )],
             })
         );
         assert_eq!(
@@ -3260,10 +3261,9 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             1,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredLinearHistory,
-                parameters: None,
-            }],
+            vec![RulesetRule::parameterless(
+                RulesetRuleType::RequiredLinearHistory,
+            )],
         )];
 
         let fixes = plan_repo_fixes(&[rs005_rule()], &facts);
@@ -3433,13 +3433,10 @@ mod tests {
     }
 
     fn pull_request_rule_with_methods(methods: Vec<MergeMethod>) -> RulesetRule {
-        RulesetRule {
-            kind: RulesetRuleType::PullRequest,
-            parameters: Some(RulesetRuleParameters {
-                allowed_merge_methods: methods,
-                ..RulesetRuleParameters::default()
-            }),
-        }
+        RulesetRule::PullRequest(PullRequestParameters {
+            allowed_merge_methods: methods,
+            ..PullRequestParameters::default()
+        })
     }
 
     #[test]
@@ -3566,15 +3563,12 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::PullRequest,
-                parameters: Some(RulesetRuleParameters {
-                    required_approving_review_count: Some(2),
-                    require_code_owner_review: Some(true),
-                    allowed_merge_methods: vec![MergeMethod::Merge, MergeMethod::Squash],
-                    ..RulesetRuleParameters::default()
-                }),
-            }],
+            vec![RulesetRule::PullRequest(PullRequestParameters {
+                required_approving_review_count: 2,
+                require_code_owner_review: true,
+                allowed_merge_methods: vec![MergeMethod::Merge, MergeMethod::Squash],
+                ..PullRequestParameters::default()
+            })],
         )];
         let fixes = plan_repo_fixes(&[rs011_rule()], &facts);
 
@@ -3583,7 +3577,7 @@ mod tests {
                 "GET",
                 "/repos/example-org/repo/rulesets/42",
                 |_| {},
-                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_code_owner_review":true,"allowed_merge_methods":["merge","squash"]}}]}"#
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_code_owner_review":true,"require_last_push_approval":false,"dismiss_stale_reviews_on_push":false,"required_review_thread_resolution":false,"allowed_merge_methods":["merge","squash"]}}]}"#
                     .to_owned(),
             ),
             ExpectedRequest::json(
@@ -3599,7 +3593,7 @@ mod tests {
                     assert_eq!(parameters["required_approving_review_count"], 2);
                     assert_eq!(parameters["require_code_owner_review"], true);
                 },
-                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_code_owner_review":true,"allowed_merge_methods":["squash"]}}]}"#
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"required_approving_review_count":2,"require_code_owner_review":true,"require_last_push_approval":false,"dismiss_stale_reviews_on_push":false,"required_review_thread_resolution":false,"allowed_merge_methods":["squash"]}}]}"#
                     .to_owned(),
             ),
         ]);
@@ -3645,7 +3639,7 @@ mod tests {
                         serde_json::json!(["squash"])
                     );
                 },
-                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"allowed_merge_methods":["squash"]}}]}"#
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"required_approving_review_count":0,"require_code_owner_review":false,"require_last_push_approval":false,"dismiss_stale_reviews_on_push":false,"required_review_thread_resolution":false,"allowed_merge_methods":["squash"]}}]}"#
                     .to_owned(),
             ),
         ]);
@@ -3696,7 +3690,7 @@ mod tests {
                         serde_json::json!(["squash"])
                     );
                 },
-                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"allowed_merge_methods":["squash"]}}]}"#
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"pull_request","parameters":{"required_approving_review_count":0,"require_code_owner_review":false,"require_last_push_approval":false,"dismiss_stale_reviews_on_push":false,"required_review_thread_resolution":false,"allowed_merge_methods":["squash"]}}]}"#
                     .to_owned(),
             ),
         ]);
@@ -3720,14 +3714,11 @@ mod tests {
         )
     }
 
-    fn required_status_checks_rule(strict: Option<bool>) -> RulesetRule {
-        RulesetRule {
-            kind: RulesetRuleType::RequiredStatusChecks,
-            parameters: Some(RulesetRuleParameters {
-                strict_required_status_checks_policy: strict,
-                ..RulesetRuleParameters::default()
-            }),
-        }
+    fn required_status_checks_rule(strict: bool) -> RulesetRule {
+        RulesetRule::RequiredStatusChecks(RequiredStatusChecksParameters {
+            strict_required_status_checks_policy: strict,
+            ..RequiredStatusChecksParameters::default()
+        })
     }
 
     #[test]
@@ -3736,7 +3727,7 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![required_status_checks_rule(Some(false))],
+            vec![required_status_checks_rule(false)],
         )];
 
         let fixes = plan_repo_fixes(&[rs013_rule()], &facts);
@@ -3764,7 +3755,7 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![required_status_checks_rule(None)],
+            vec![required_status_checks_rule(false)],
         )];
 
         let fixes = plan_repo_fixes(&[rs013_rule()], &facts);
@@ -3836,12 +3827,12 @@ mod tests {
             ruleset_for_default_branch(
                 1,
                 "main protection",
-                vec![required_status_checks_rule(Some(false))],
+                vec![required_status_checks_rule(false)],
             ),
             ruleset_for_default_branch(
                 2,
                 "extra protection",
-                vec![required_status_checks_rule(None)],
+                vec![required_status_checks_rule(false)],
             ),
         ];
 
@@ -3864,7 +3855,7 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![required_status_checks_rule(Some(true))],
+            vec![required_status_checks_rule(true)],
         )];
 
         let fixes = plan_repo_fixes(&[rs013_rule()], &facts);
@@ -3884,7 +3875,7 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![required_status_checks_rule(Some(false))],
+            vec![required_status_checks_rule(false)],
         )];
         let fixes = plan_repo_fixes(&[rs013_rule()], &facts);
 
@@ -3935,7 +3926,7 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![required_status_checks_rule(Some(false))],
+            vec![required_status_checks_rule(false)],
         )];
         let fixes = plan_repo_fixes(&[rs011_rule(), rs013_rule()], &facts);
         assert_eq!(fixes.len(), 2);
@@ -3974,7 +3965,7 @@ mod tests {
                         serde_json::json!(["squash"])
                     );
                 },
-                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[]}},{"type":"pull_request","parameters":{"allowed_merge_methods":["squash"]}}]}"#
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","rules":[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[]}},{"type":"pull_request","parameters":{"required_approving_review_count":0,"require_code_owner_review":false,"require_last_push_approval":false,"dismiss_stale_reviews_on_push":false,"required_review_thread_resolution":false,"allowed_merge_methods":["squash"]}}]}"#
                     .to_owned(),
             ),
         ]);
@@ -4037,16 +4028,15 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredStatusChecks,
-                parameters: Some(RulesetRuleParameters {
+            vec![RulesetRule::RequiredStatusChecks(
+                RequiredStatusChecksParameters {
                     required_status_checks: vec![crate::github::types::RequiredStatusCheck {
                         context: "other".to_owned(),
                         integration_id: None,
                     }],
-                    ..RulesetRuleParameters::default()
-                }),
-            }],
+                    ..RequiredStatusChecksParameters::default()
+                },
+            )],
         )];
 
         let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
@@ -4072,16 +4062,15 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredStatusChecks,
-                parameters: Some(RulesetRuleParameters {
+            vec![RulesetRule::RequiredStatusChecks(
+                RequiredStatusChecksParameters {
                     required_status_checks: vec![crate::github::types::RequiredStatusCheck {
                         context: "all-required-checks-complete".to_owned(),
                         integration_id: Some(15368),
                     }],
-                    ..RulesetRuleParameters::default()
-                }),
-            }],
+                    ..RequiredStatusChecksParameters::default()
+                },
+            )],
         )];
 
         let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
@@ -4101,16 +4090,15 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredStatusChecks,
-                parameters: Some(RulesetRuleParameters {
+            vec![RulesetRule::RequiredStatusChecks(
+                RequiredStatusChecksParameters {
                     required_status_checks: vec![crate::github::types::RequiredStatusCheck {
                         context: "all-required-checks-complete".to_owned(),
                         integration_id: None,
                     }],
-                    ..RulesetRuleParameters::default()
-                }),
-            }],
+                    ..RequiredStatusChecksParameters::default()
+                },
+            )],
         )];
 
         let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
@@ -4139,16 +4127,15 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredStatusChecks,
-                parameters: Some(RulesetRuleParameters {
+            vec![RulesetRule::RequiredStatusChecks(
+                RequiredStatusChecksParameters {
                     required_status_checks: vec![crate::github::types::RequiredStatusCheck {
                         context: "all-required-checks-complete".to_owned(),
                         integration_id: None,
                     }],
-                    ..RulesetRuleParameters::default()
-                }),
-            }],
+                    ..RequiredStatusChecksParameters::default()
+                },
+            )],
         )];
         let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
@@ -4157,7 +4144,7 @@ mod tests {
                 "GET",
                 "/repos/example-org/repo/rulesets/42",
                 |_| {},
-                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"all-required-checks-complete"}]}}]}"#
+                r#"{"id":42,"name":"main protection","target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"all-required-checks-complete"}],"strict_required_status_checks_policy":false}}]}"#
                     .to_owned(),
             ),
             ExpectedRequest::json(
@@ -4235,17 +4222,16 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredStatusChecks,
-                parameters: Some(RulesetRuleParameters {
+            vec![RulesetRule::RequiredStatusChecks(
+                RequiredStatusChecksParameters {
                     required_status_checks: vec![crate::github::types::RequiredStatusCheck {
                         context: "other".to_owned(),
                         integration_id: Some(7),
                     }],
-                    strict_required_status_checks_policy: Some(true),
-                    ..RulesetRuleParameters::default()
-                }),
-            }],
+                    strict_required_status_checks_policy: true,
+                    ..RequiredStatusChecksParameters::default()
+                },
+            )],
         )];
         let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
@@ -4491,10 +4477,9 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             1,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredLinearHistory,
-                parameters: None,
-            }],
+            vec![RulesetRule::parameterless(
+                RulesetRuleType::RequiredLinearHistory,
+            )],
         )];
 
         let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
@@ -4520,10 +4505,9 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             1,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredLinearHistory,
-                parameters: None,
-            }],
+            vec![RulesetRule::parameterless(
+                RulesetRuleType::RequiredLinearHistory,
+            )],
         )];
         let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
 
@@ -4554,10 +4538,9 @@ mod tests {
         facts.rulesets = vec![ruleset_for_default_branch(
             1,
             "main protection",
-            vec![RulesetRule {
-                kind: RulesetRuleType::RequiredLinearHistory,
-                parameters: None,
-            }],
+            vec![RulesetRule::parameterless(
+                RulesetRuleType::RequiredLinearHistory,
+            )],
         )];
         let fixes = plan_repo_fixes(&[rs007_rule()], &facts);
 
@@ -5103,7 +5086,11 @@ mod tests {
 
     struct TestServer {
         base_url: String,
-        handle: Option<thread::JoinHandle<()>>,
+        // The worker returns every schema violation it saw. Surfacing them from
+        // `Drop` (rather than panicking mid-request) lets the executor flow run
+        // to completion, so the schema report — not a spurious connection error —
+        // is the failure the test reports.
+        handle: Option<thread::JoinHandle<Vec<String>>>,
     }
 
     impl TestServer {
@@ -5111,12 +5098,23 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let handle = thread::spawn(move || {
+                let mut schema_violations = Vec::new();
                 for expected in expectations {
                     let (mut stream, _) = listener.accept().unwrap();
                     let request = read_request(&mut stream);
                     assert_eq!(request.method, expected.method);
                     (expected.assert_path)(&request.path);
                     (expected.assert_body)(&request.body);
+                    // Beyond the test's own assertion, refuse any body GitHub's
+                    // published schema would reject — the mock must not accept
+                    // payloads the real API 422s on.
+                    if let Err(report) = crate::openapi::check_request_body(
+                        &request.method,
+                        &request.path,
+                        &request.body,
+                    ) {
+                        schema_violations.push(report);
+                    }
 
                     let response = format!(
                         "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -5126,6 +5124,7 @@ mod tests {
                     );
                     stream.write_all(response.as_bytes()).unwrap();
                 }
+                schema_violations
             });
 
             Self {
@@ -5141,8 +5140,26 @@ mod tests {
 
     impl Drop for TestServer {
         fn drop(&mut self) {
-            if let Some(handle) = self.handle.take() {
-                handle.join().unwrap();
+            let Some(handle) = self.handle.take() else {
+                return;
+            };
+            match handle.join() {
+                Ok(violations) if !violations.is_empty() => {
+                    // Don't double-panic if the test is already failing.
+                    if !std::thread::panicking() {
+                        panic!(
+                            "mock server received {} request body/bodies that GitHub would reject:\n\n{}",
+                            violations.len(),
+                            violations.join("\n\n")
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(payload) => {
+                    if !std::thread::panicking() {
+                        std::panic::resume_unwind(payload);
+                    }
+                }
             }
         }
     }

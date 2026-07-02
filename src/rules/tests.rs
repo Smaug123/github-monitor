@@ -10,9 +10,9 @@ use crate::facts::{RepoFacts, RepoSettings, WorkflowFile};
 use crate::github::types::{
     BranchProtection, BypassActor, BypassActorType, BypassMode, DefaultWorkflowPermissions,
     ForkPrApprovalPolicy, LegacyEnabledFlag, LegacyRequiredPullRequestReviews,
-    LegacyRequiredStatusChecks, LegacyRestrictions, MergeMethod, RefNameCondition,
-    RequiredStatusCheck, Ruleset, RulesetConditions, RulesetEnforcement, RulesetRule,
-    RulesetRuleParameters, RulesetRuleType, RulesetTarget,
+    LegacyRequiredStatusChecks, LegacyRestrictions, MergeMethod, PullRequestParameters,
+    RefNameCondition, RequiredStatusCheck, RequiredStatusChecksParameters, Ruleset,
+    RulesetConditions, RulesetEnforcement, RulesetRule, RulesetRuleType, RulesetTarget,
 };
 use crate::types::{BranchName, Gathered, RepoRef, RuleId};
 use crate::workflow::model::{
@@ -137,19 +137,6 @@ fn bypass_actor_strategy() -> impl Strategy<Value = BypassActor> {
         })
 }
 
-fn ruleset_rule_type_strategy() -> impl Strategy<Value = RulesetRuleType> {
-    prop_oneof![
-        Just(RulesetRuleType::Creation),
-        Just(RulesetRuleType::Update),
-        Just(RulesetRuleType::Deletion),
-        Just(RulesetRuleType::RequiredLinearHistory),
-        Just(RulesetRuleType::RequiredSignatures),
-        Just(RulesetRuleType::PullRequest),
-        Just(RulesetRuleType::RequiredStatusChecks),
-        Just(RulesetRuleType::NonFastForward),
-    ]
-}
-
 fn required_status_check_strategy() -> impl Strategy<Value = RequiredStatusCheck> {
     (identifier(), proptest::option::of(any::<u64>())).prop_map(|(context, integration_id)| {
         RequiredStatusCheck {
@@ -159,40 +146,54 @@ fn required_status_check_strategy() -> impl Strategy<Value = RequiredStatusCheck
     })
 }
 
-fn ruleset_rule_parameters_strategy() -> impl Strategy<Value = RulesetRuleParameters> {
+fn pull_request_parameters_strategy() -> impl Strategy<Value = PullRequestParameters> {
+    (
+        any::<bool>(),
+        any::<bool>(),
+        any::<bool>(),
+        0u32..5,
+        any::<bool>(),
+        proptest::collection::vec(merge_method_strategy(), 0..4),
+    )
+        .prop_map(
+            |(
+                dismiss_stale_reviews_on_push,
+                require_code_owner_review,
+                require_last_push_approval,
+                required_approving_review_count,
+                required_review_thread_resolution,
+                allowed_merge_methods,
+            )| PullRequestParameters {
+                dismiss_stale_reviews_on_push,
+                require_code_owner_review,
+                require_last_push_approval,
+                required_approving_review_count,
+                required_review_thread_resolution,
+                allowed_merge_methods,
+                extra: serde_json::Map::new(),
+            },
+        )
+}
+
+fn required_status_checks_parameters_strategy()
+-> impl Strategy<Value = RequiredStatusChecksParameters> {
     (
         proptest::collection::vec(required_status_check_strategy(), 0..3),
+        any::<bool>(),
         proptest::option::of(any::<bool>()),
-        proptest::option::of(0u32..5),
-        proptest::option::of(any::<bool>()),
-        proptest::option::of(any::<bool>()),
-        proptest::option::of(any::<bool>()),
-        proptest::option::of(any::<bool>()),
-        proptest::option::of(any::<bool>()),
-        proptest::collection::vec(merge_method_strategy(), 0..4),
     )
         .prop_map(
             |(
                 required_status_checks,
                 strict_required_status_checks_policy,
-                required_approving_review_count,
-                require_code_owner_review,
-                require_last_push_approval,
-                required_review_thread_resolution,
-                dismiss_stale_reviews_on_push,
                 do_not_enforce_on_create,
-                allowed_merge_methods,
-            )| RulesetRuleParameters {
-                required_status_checks,
-                strict_required_status_checks_policy,
-                required_approving_review_count,
-                require_code_owner_review,
-                require_last_push_approval,
-                required_review_thread_resolution,
-                dismiss_stale_reviews_on_push,
-                do_not_enforce_on_create,
-                allowed_merge_methods,
-                extra: serde_json::Map::new(),
+            )| {
+                RequiredStatusChecksParameters {
+                    required_status_checks,
+                    strict_required_status_checks_policy,
+                    do_not_enforce_on_create,
+                    extra: serde_json::Map::new(),
+                }
             },
         )
 }
@@ -206,11 +207,19 @@ fn merge_method_strategy() -> impl Strategy<Value = MergeMethod> {
 }
 
 fn ruleset_rule_strategy() -> impl Strategy<Value = RulesetRule> {
-    (
-        ruleset_rule_type_strategy(),
-        proptest::option::of(ruleset_rule_parameters_strategy()),
-    )
-        .prop_map(|(kind, parameters)| RulesetRule { kind, parameters })
+    prop_oneof![
+        pull_request_parameters_strategy().prop_map(RulesetRule::PullRequest),
+        required_status_checks_parameters_strategy().prop_map(RulesetRule::RequiredStatusChecks),
+        prop_oneof![
+            Just(RulesetRuleType::Creation),
+            Just(RulesetRuleType::Update),
+            Just(RulesetRuleType::Deletion),
+            Just(RulesetRuleType::RequiredLinearHistory),
+            Just(RulesetRuleType::RequiredSignatures),
+            Just(RulesetRuleType::NonFastForward),
+        ]
+        .prop_map(RulesetRule::parameterless),
+    ]
 }
 
 fn ruleset_target_strategy() -> impl Strategy<Value = RulesetTarget> {
@@ -2030,24 +2039,17 @@ fn ruleset_enforces_admins_fails_when_repository_role_can_bypass() {
 #[test]
 fn ruleset_requires_status_check_passes_when_check_exists() {
     let mut facts = base_facts();
-    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
-        kind: RulesetRuleType::RequiredStatusChecks,
-        parameters: Some(RulesetRuleParameters {
+    facts.rulesets = vec![active_branch_ruleset(vec![
+        RulesetRule::RequiredStatusChecks(RequiredStatusChecksParameters {
             required_status_checks: vec![RequiredStatusCheck {
                 context: "ci".to_owned(),
                 integration_id: None,
             }],
-            strict_required_status_checks_policy: Some(true),
-            required_approving_review_count: None,
-            require_code_owner_review: None,
-            require_last_push_approval: None,
-            required_review_thread_resolution: None,
-            dismiss_stale_reviews_on_push: None,
+            strict_required_status_checks_policy: true,
             do_not_enforce_on_create: None,
-            allowed_merge_methods: Vec::new(),
             extra: serde_json::Map::new(),
         }),
-    }])];
+    ])];
 
     assert_eq!(
         evaluate(
@@ -2065,16 +2067,15 @@ fn ruleset_requires_status_check_passes_when_check_exists() {
 fn ruleset_requires_status_check_respects_github_actions_source() {
     let check_with = |integration_id| {
         let mut facts = base_facts();
-        facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
-            kind: RulesetRuleType::RequiredStatusChecks,
-            parameters: Some(RulesetRuleParameters {
+        facts.rulesets = vec![active_branch_ruleset(vec![
+            RulesetRule::RequiredStatusChecks(RequiredStatusChecksParameters {
                 required_status_checks: vec![RequiredStatusCheck {
                     context: "all-required-checks-complete".to_owned(),
                     integration_id,
                 }],
                 ..Default::default()
             }),
-        }])];
+        ])];
         facts
     };
     let github_actions = |integration_id| {
@@ -2113,16 +2114,15 @@ fn ruleset_requires_status_check_respects_github_actions_source() {
 fn ruleset_scoped_to_other_branch_does_not_satisfy_default_branch_rules() {
     let mut facts = base_facts();
     facts.default_branch = BranchName::new("main");
-    let mut ruleset = active_branch_ruleset(vec![RulesetRule {
-        kind: RulesetRuleType::RequiredStatusChecks,
-        parameters: Some(RulesetRuleParameters {
+    let mut ruleset = active_branch_ruleset(vec![RulesetRule::RequiredStatusChecks(
+        RequiredStatusChecksParameters {
             required_status_checks: vec![RequiredStatusCheck {
                 context: "ci".to_owned(),
                 integration_id: None,
             }],
             ..Default::default()
-        }),
-    }]);
+        },
+    )]);
     ruleset.conditions = Some(RulesetConditions {
         ref_name: Some(RefNameCondition {
             include: vec!["release/*".to_owned()],
@@ -2454,36 +2454,29 @@ fn ruleset_without_conditions_is_treated_as_applying() {
 }
 
 fn pull_request_rule_with_methods(methods: Vec<MergeMethod>) -> RulesetRule {
-    RulesetRule {
-        kind: RulesetRuleType::PullRequest,
-        parameters: Some(RulesetRuleParameters {
-            allowed_merge_methods: methods,
-            ..RulesetRuleParameters::default()
-        }),
-    }
+    RulesetRule::PullRequest(PullRequestParameters {
+        allowed_merge_methods: methods,
+        ..PullRequestParameters::default()
+    })
 }
 
-fn required_status_checks_rule(strict: Option<bool>) -> RulesetRule {
-    RulesetRule {
-        kind: RulesetRuleType::RequiredStatusChecks,
-        parameters: Some(RulesetRuleParameters {
-            required_status_checks: vec![RequiredStatusCheck {
-                context: "ci".to_owned(),
-                integration_id: None,
-            }],
-            strict_required_status_checks_policy: strict,
-            ..RulesetRuleParameters::default()
-        }),
-    }
+fn required_status_checks_rule(strict: bool) -> RulesetRule {
+    RulesetRule::RequiredStatusChecks(RequiredStatusChecksParameters {
+        required_status_checks: vec![RequiredStatusCheck {
+            context: "ci".to_owned(),
+            integration_id: None,
+        }],
+        strict_required_status_checks_policy: strict,
+        ..RequiredStatusChecksParameters::default()
+    })
 }
 
 #[test]
 fn ruleset_restricts_deletions_passes_when_rule_present() {
     let mut facts = base_facts();
-    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
-        kind: RulesetRuleType::Deletion,
-        parameters: None,
-    }])];
+    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule::parameterless(
+        RulesetRuleType::Deletion,
+    )])];
 
     assert_eq!(
         evaluate(
@@ -2524,10 +2517,9 @@ fn ruleset_restricts_deletions_fails_when_no_active_ruleset() {
 #[test]
 fn ruleset_requires_signed_commits_passes_when_rule_present() {
     let mut facts = base_facts();
-    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
-        kind: RulesetRuleType::RequiredSignatures,
-        parameters: None,
-    }])];
+    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule::parameterless(
+        RulesetRuleType::RequiredSignatures,
+    )])];
 
     assert_eq!(
         evaluate(
@@ -2656,7 +2648,7 @@ fn ruleset_restricts_merge_methods_fails_without_pull_request_rule() {
 fn ruleset_requires_strict_status_checks_passes_with_strict_true() {
     let mut facts = base_facts();
     facts.rulesets = vec![active_branch_ruleset(vec![required_status_checks_rule(
-        Some(true),
+        true,
     )])];
 
     assert_eq!(
@@ -2672,7 +2664,7 @@ fn ruleset_requires_strict_status_checks_passes_with_strict_true() {
 fn ruleset_requires_strict_status_checks_fails_with_strict_false() {
     let mut facts = base_facts();
     facts.rulesets = vec![active_branch_ruleset(vec![required_status_checks_rule(
-        Some(false),
+        false,
     )])];
 
     assert!(matches!(
@@ -2688,7 +2680,7 @@ fn ruleset_requires_strict_status_checks_fails_with_strict_false() {
 fn ruleset_requires_strict_status_checks_fails_with_strict_none() {
     let mut facts = base_facts();
     facts.rulesets = vec![active_branch_ruleset(vec![required_status_checks_rule(
-        None,
+        false,
     )])];
 
     assert!(matches!(
@@ -2714,31 +2706,25 @@ fn ruleset_requires_strict_status_checks_fails_without_required_status_checks_ru
     ));
 }
 
-fn pull_request_rule(parameters: RulesetRuleParameters) -> RulesetRule {
-    RulesetRule {
-        kind: RulesetRuleType::PullRequest,
-        parameters: Some(parameters),
-    }
+fn pull_request_rule(parameters: PullRequestParameters) -> RulesetRule {
+    RulesetRule::PullRequest(parameters)
 }
 
 fn rule_without_parameters(kind: RulesetRuleType) -> RulesetRule {
-    RulesetRule {
-        kind,
-        parameters: None,
-    }
+    RulesetRule::parameterless(kind)
 }
 
 fn fully_covering_facts() -> RepoFacts {
     let mut facts = base_facts();
     facts.rulesets = vec![active_branch_ruleset(vec![
-        required_status_checks_rule(Some(true)),
-        pull_request_rule(RulesetRuleParameters {
-            required_approving_review_count: Some(2),
-            require_code_owner_review: Some(true),
-            require_last_push_approval: Some(true),
-            required_review_thread_resolution: Some(true),
-            dismiss_stale_reviews_on_push: Some(true),
-            ..RulesetRuleParameters::default()
+        required_status_checks_rule(true),
+        pull_request_rule(PullRequestParameters {
+            required_approving_review_count: 2,
+            require_code_owner_review: true,
+            require_last_push_approval: true,
+            required_review_thread_resolution: true,
+            dismiss_stale_reviews_on_push: true,
+            ..PullRequestParameters::default()
         }),
         rule_without_parameters(RulesetRuleType::RequiredLinearHistory),
         rule_without_parameters(RulesetRuleType::NonFastForward),
@@ -2800,17 +2786,15 @@ fn supersedes_accepts_fully_covered_legacy_protection() {
 #[test]
 fn supersedes_rejects_missing_status_check_context() {
     let mut facts = fully_covering_facts();
-    facts.rulesets[0].rules[0] = RulesetRule {
-        kind: RulesetRuleType::RequiredStatusChecks,
-        parameters: Some(RulesetRuleParameters {
+    facts.rulesets[0].rules[0] =
+        RulesetRule::RequiredStatusChecks(RequiredStatusChecksParameters {
             required_status_checks: vec![RequiredStatusCheck {
                 context: "other".to_owned(),
                 integration_id: None,
             }],
-            strict_required_status_checks_policy: Some(true),
-            ..RulesetRuleParameters::default()
-        }),
-    };
+            strict_required_status_checks_policy: true,
+            ..RequiredStatusChecksParameters::default()
+        });
     let legacy = fully_covering_legacy();
 
     let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
@@ -2825,7 +2809,7 @@ fn supersedes_rejects_missing_status_check_context() {
 #[test]
 fn supersedes_rejects_legacy_strict_without_strict_ruleset() {
     let mut facts = fully_covering_facts();
-    facts.rulesets[0].rules[0] = required_status_checks_rule(Some(false));
+    facts.rulesets[0].rules[0] = required_status_checks_rule(false);
     let legacy = fully_covering_legacy();
 
     let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
@@ -2838,8 +2822,8 @@ fn supersedes_rejects_legacy_strict_without_strict_ruleset() {
 #[test]
 fn supersedes_rejects_pr_review_count_below_legacy() {
     let mut facts = fully_covering_facts();
-    if let Some(parameters) = facts.rulesets[0].rules[1].parameters.as_mut() {
-        parameters.required_approving_review_count = Some(1);
+    if let RulesetRule::PullRequest(parameters) = &mut facts.rulesets[0].rules[1] {
+        parameters.required_approving_review_count = 1;
     }
     let legacy = fully_covering_legacy();
 
@@ -2857,7 +2841,7 @@ fn supersedes_rejects_when_no_ruleset_blocks_force_pushes() {
     let mut facts = fully_covering_facts();
     facts.rulesets[0]
         .rules
-        .retain(|rule| rule.kind != RulesetRuleType::NonFastForward);
+        .retain(|rule| rule.kind() != RulesetRuleType::NonFastForward);
     let legacy = fully_covering_legacy();
 
     let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
@@ -2874,7 +2858,7 @@ fn supersedes_treats_missing_allow_force_pushes_as_restrictive() {
     let mut facts = fully_covering_facts();
     facts.rulesets[0]
         .rules
-        .retain(|rule| rule.kind != RulesetRuleType::NonFastForward);
+        .retain(|rule| rule.kind() != RulesetRuleType::NonFastForward);
     let mut legacy = fully_covering_legacy();
     legacy.allow_force_pushes = None;
 
@@ -2890,7 +2874,7 @@ fn supersedes_ignores_allow_force_pushes_when_legacy_is_permissive() {
     let mut facts = fully_covering_facts();
     facts.rulesets[0]
         .rules
-        .retain(|rule| rule.kind != RulesetRuleType::NonFastForward);
+        .retain(|rule| rule.kind() != RulesetRuleType::NonFastForward);
     let mut legacy = fully_covering_legacy();
     legacy.allow_force_pushes = Some(LegacyEnabledFlag { enabled: true });
 
@@ -2951,7 +2935,7 @@ fn supersedes_rejects_when_pr_reviews_present_but_no_pr_rule() {
     let mut facts = fully_covering_facts();
     facts.rulesets[0]
         .rules
-        .retain(|rule| rule.kind != RulesetRuleType::PullRequest);
+        .retain(|rule| rule.kind() != RulesetRuleType::PullRequest);
     let legacy = fully_covering_legacy();
 
     let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
@@ -2990,9 +2974,8 @@ fn supersedes_rejects_when_bypass_pull_request_allowances_non_empty() {
 #[test]
 fn supersedes_status_check_context_set_normalises_legacy_checks_field() {
     let mut facts = base_facts();
-    facts.rulesets = vec![active_branch_ruleset(vec![RulesetRule {
-        kind: RulesetRuleType::RequiredStatusChecks,
-        parameters: Some(RulesetRuleParameters {
+    facts.rulesets = vec![active_branch_ruleset(vec![
+        RulesetRule::RequiredStatusChecks(RequiredStatusChecksParameters {
             required_status_checks: vec![
                 RequiredStatusCheck {
                     context: "ci".to_owned(),
@@ -3003,9 +2986,9 @@ fn supersedes_status_check_context_set_normalises_legacy_checks_field() {
                     integration_id: None,
                 },
             ],
-            ..RulesetRuleParameters::default()
+            ..RequiredStatusChecksParameters::default()
         }),
-    }])];
+    ])];
     let legacy = BranchProtection {
         required_status_checks: Some(LegacyRequiredStatusChecks {
             strict: false,
@@ -3035,29 +3018,27 @@ fn supersedes_status_check_unions_contexts_across_rulesets() {
     facts.rulesets = vec![
         Ruleset {
             id: 1,
-            ..active_branch_ruleset(vec![RulesetRule {
-                kind: RulesetRuleType::RequiredStatusChecks,
-                parameters: Some(RulesetRuleParameters {
+            ..active_branch_ruleset(vec![RulesetRule::RequiredStatusChecks(
+                RequiredStatusChecksParameters {
                     required_status_checks: vec![RequiredStatusCheck {
                         context: "ci".to_owned(),
                         integration_id: None,
                     }],
-                    ..RulesetRuleParameters::default()
-                }),
-            }])
+                    ..RequiredStatusChecksParameters::default()
+                },
+            )])
         },
         Ruleset {
             id: 2,
-            ..active_branch_ruleset(vec![RulesetRule {
-                kind: RulesetRuleType::RequiredStatusChecks,
-                parameters: Some(RulesetRuleParameters {
+            ..active_branch_ruleset(vec![RulesetRule::RequiredStatusChecks(
+                RequiredStatusChecksParameters {
                     required_status_checks: vec![RequiredStatusCheck {
                         context: "lint".to_owned(),
                         integration_id: None,
                     }],
-                    ..RulesetRuleParameters::default()
-                }),
-            }])
+                    ..RequiredStatusChecksParameters::default()
+                },
+            )])
         },
     ];
     let legacy = BranchProtection {
