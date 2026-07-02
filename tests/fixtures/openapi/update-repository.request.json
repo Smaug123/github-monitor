@@ -35,6 +35,9 @@
       "default": false,
       "type": "boolean"
     },
+    "description": {
+      "type": "string"
+    },
     "has_issues": {
       "default": true,
       "type": "boolean"

@@ -73,6 +73,18 @@ const LOCAL_TIGHTENINGS: &[Tightening] = &[Tightening {
 /// readable, stable fixtures.
 const ANNOTATION_KEYS: &[&str] = &["description", "example", "examples", "title", "deprecated"];
 
+/// JSON Schema keywords whose value is a map from *arbitrary field names* (not
+/// schema keywords) to subschemas. Their keys are data — a property named
+/// `title` or `description` is a real API field — so annotation stripping must
+/// recurse into the subschema *values* without touching the map's keys.
+const SUBSCHEMA_MAP_KEYS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "$defs",
+    "definitions",
+];
+
 fn deref_url() -> String {
     format!(
         "https://raw.githubusercontent.com/{PIN_REPO}/{PIN_SHA}/descriptions/api.github.com/dereferenced/api.github.com.{API_VERSION}.deref.json"
@@ -98,6 +110,10 @@ fn load_description() -> Result<Value, Box<dyn Error>> {
 
 /// Rewrites OpenAPI 3.0 `nullable: true` into a JSON-Schema null union and drops
 /// annotation keywords, recursively.
+///
+/// The recursion is schema-aware: under a [`SUBSCHEMA_MAP_KEYS`] keyword (e.g.
+/// `properties`) the keys are field names, so we normalize each subschema value
+/// but never strip the map's own keys — a property named `title` survives.
 fn normalize(node: &mut Value) {
     match node {
         Value::Object(map) => {
@@ -110,8 +126,12 @@ fn normalize(node: &mut Value) {
             for key in ANNOTATION_KEYS {
                 map.remove(*key);
             }
-            for value in map.values_mut() {
-                normalize(value);
+            for (key, value) in map.iter_mut() {
+                if SUBSCHEMA_MAP_KEYS.contains(&key.as_str()) {
+                    normalize_subschema_map(value);
+                } else {
+                    normalize(value);
+                }
             }
         }
         Value::Array(items) => {
@@ -120,6 +140,17 @@ fn normalize(node: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Normalizes each subschema in a name→schema map (e.g. `properties`) without
+/// treating the map's own keys as schema keywords. A non-object value (an
+/// unexpected shape) is left untouched.
+fn normalize_subschema_map(node: &mut Value) {
+    if let Value::Object(map) = node {
+        for value in map.values_mut() {
+            normalize(value);
+        }
     }
 }
 
@@ -203,4 +234,114 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("wrote pin.json");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn strips_annotations_from_schema_objects() {
+        let mut node = json!({
+            "type": "object",
+            "title": "Some title",
+            "description": "Some description",
+            "example": {"a": 1},
+            "deprecated": false,
+        });
+        normalize(&mut node);
+        assert_eq!(node, json!({"type": "object"}));
+    }
+
+    #[test]
+    fn rewrites_nullable_into_a_null_union() {
+        let mut node = json!({"type": "string", "nullable": true});
+        normalize(&mut node);
+        assert_eq!(node, json!({"type": ["string", "null"]}));
+    }
+
+    #[test]
+    fn preserves_property_schemas_named_like_annotations() {
+        // The keys of a `properties` map are API field names, not annotation
+        // keywords: a property literally named `title` or `description` must
+        // keep its subschema even though the same word is stripped when it
+        // appears as a schema-level annotation.
+        let mut node = json!({
+            "type": "object",
+            "title": "Create a pull request",
+            "properties": {
+                "title": {"type": "string", "description": "stripped as annotation"},
+                "description": {"type": "string"},
+                "head": {"type": "string"},
+            },
+        });
+        normalize(&mut node);
+        assert_eq!(
+            node,
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "head": {"type": "string"},
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn normalizes_subschemas_nested_under_properties() {
+        // Recursion still reaches inside property subschemas: `nullable` is
+        // rewritten and annotations are stripped there too.
+        let mut node = json!({
+            "type": "object",
+            "properties": {
+                "homepage": {"type": "string", "nullable": true, "description": "x"},
+            },
+        });
+        normalize(&mut node);
+        assert_eq!(
+            node,
+            json!({
+                "type": "object",
+                "properties": {
+                    "homepage": {"type": ["string", "null"]},
+                },
+            }),
+        );
+    }
+
+    proptest! {
+        /// Every property name survives normalization, including names that
+        /// collide with annotation keywords.
+        #[test]
+        fn property_names_survive(
+            names in proptest::collection::hash_set(
+                prop_oneof![
+                    Just("title".to_owned()),
+                    Just("description".to_owned()),
+                    Just("example".to_owned()),
+                    Just("examples".to_owned()),
+                    Just("deprecated".to_owned()),
+                    "[a-z_]{1,8}",
+                ],
+                0..6,
+            ),
+        ) {
+            let props: serde_json::Map<String, Value> = names
+                .iter()
+                .map(|name| (name.clone(), json!({"type": "string"})))
+                .collect();
+            let mut node = json!({"type": "object", "properties": props});
+            normalize(&mut node);
+            let survivors: std::collections::HashSet<String> = node["properties"]
+                .as_object()
+                .expect("properties stays an object")
+                .keys()
+                .cloned()
+                .collect();
+            prop_assert_eq!(survivors, names);
+        }
+    }
 }

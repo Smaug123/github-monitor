@@ -22,6 +22,9 @@
     },
     "maintainer_can_modify": {
       "type": "boolean"
+    },
+    "title": {
+      "type": "string"
     }
   },
   "required": [

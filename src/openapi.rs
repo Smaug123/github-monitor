@@ -327,6 +327,27 @@ mod tests {
     }
 
     #[test]
+    fn property_schemas_named_like_annotations_are_enforced() {
+        // Regression guard for the fixture generator: `title` and `description`
+        // are real API fields whose names collide with stripped annotation
+        // keywords. If the generator drops those property schemas, these bodies
+        // become silently unvalidated (additionalProperties is permissive), so
+        // the wrong-typed cases below would wrongly pass.
+        valid(
+            "POST",
+            "/repos/o/r/pulls",
+            json!({"title": "t", "head": "h", "base": "b"}),
+        );
+        invalid(
+            "POST",
+            "/repos/o/r/pulls",
+            json!({"title": 123, "head": "h", "base": "b"}),
+        );
+        valid("PATCH", "/repos/o/r", json!({"description": "a repo"}));
+        invalid("PATCH", "/repos/o/r", json!({"description": 123}));
+    }
+
+    #[test]
     fn enum_and_required_violations_are_rejected() {
         invalid(
             "PUT",
