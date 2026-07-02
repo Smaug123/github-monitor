@@ -335,7 +335,9 @@ fn condition_is_always(condition: Option<&str>) -> bool {
     };
 
     let normalized: String = condition.chars().filter(|ch| !ch.is_whitespace()).collect();
-    normalized == "${{always()}}"
+    // GitHub evaluates `if:` as an expression, so the `${{ }}` wrapper is
+    // optional: `if: always()` and `if: ${{ always() }}` are equivalent.
+    normalized == "always()" || normalized == "${{always()}}"
 }
 
 fn workflow_runs_on_push_to_branch(workflow: &Workflow, branch: &str) -> bool {

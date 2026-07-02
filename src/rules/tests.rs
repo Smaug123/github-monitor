@@ -2670,6 +2670,25 @@ fn workflow_has_required_checks_complete_tolerates_extra_whitespace() {
 }
 
 #[test]
+fn workflow_has_required_checks_complete_accepts_bare_always() {
+    // GitHub evaluates `if:` as an expression, so `if: always()` (no `${{ }}`)
+    // is equivalent to `${{ always() }}` and must satisfy WF004.
+    let mut facts = base_facts();
+    facts.workflows = vec![required_checks_workflow(
+        Some("always()"),
+        vec![check_required_lite_step()],
+    )];
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+            &facts
+        ),
+        RuleResult::Pass
+    );
+}
+
+#[test]
 fn workflow_has_required_checks_complete_fails_when_job_absent() {
     let mut facts = base_facts();
     facts.workflows = vec![workflow_with_single_job(
@@ -2751,23 +2770,6 @@ fn workflow_has_required_checks_complete_fails_for_wrong_if_condition() {
         reason.contains("if-condition is `${{ success() }}`"),
         "unexpected reason: {reason}"
     );
-}
-
-#[test]
-fn workflow_has_required_checks_complete_rejects_bare_always_without_wrapper() {
-    let mut facts = base_facts();
-    facts.workflows = vec![required_checks_workflow(
-        Some("always()"),
-        vec![check_required_lite_step()],
-    )];
-
-    assert!(matches!(
-        evaluate(
-            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
-            &facts
-        ),
-        RuleResult::Fail { .. }
-    ));
 }
 
 #[test]
