@@ -75,15 +75,17 @@ pub(super) fn evaluate(rule: &RulesetCheck, facts: &RepoFacts) -> RuleResult {
                 };
             }
 
-            if let Some(actor_type) = active_branch_rulesets_for_default_branch(facts)
-                .flat_map(|ruleset| ruleset.bypass_actors.iter())
-                .find_map(forbidden_bypass_actor_name)
-            {
-                RuleResult::Fail {
+            match admin_bypass_problem(active_branch_rulesets_for_default_branch(facts)) {
+                Some(AdminBypassProblem::Forbidden(actor_type)) => RuleResult::Fail {
                     reason: format!("an active branch ruleset allows `{actor_type}` to bypass it"),
-                }
-            } else {
-                RuleResult::Pass
+                },
+                Some(AdminBypassProblem::Unrecognised(actor_type)) => RuleResult::Error {
+                    reason: format!(
+                        "an active branch ruleset has a bypass actor of unrecognised type \
+                         `{actor_type}`; cannot determine whether admins are enforced"
+                    ),
+                },
+                None => RuleResult::Pass,
             }
         }
         RulesetCheck::RulesetRequiresLinearHistory => ruleset_rule_presence_result(
@@ -207,15 +209,59 @@ fn ref_name_pattern_matches(pattern: &str, branch: &str) -> bool {
     }
 }
 
+/// How a single bypass actor bears on admin enforcement (RS004 and the
+/// legacy-supersession check).
+enum BypassActorVerdict<'a> {
+    /// A known actor class that must not be able to bypass — the rule fails.
+    Forbidden(&'static str),
+    /// An actor class GitHub has introduced that this tool does not model, so we
+    /// cannot tell whether it is a dangerous bypass — the rule must not pass.
+    Unrecognised(&'a str),
+    /// A known actor class deliberately permitted to bypass.
+    Permitted,
+}
+
 // GitHub exposes bypassable repository roles under `RepositoryRole`, but our
 // facts currently do not resolve the role ID into a narrower built-in or custom
 // role name, so any repository-role bypass is treated as forbidden.
-fn forbidden_bypass_actor_name(actor: &BypassActor) -> Option<&'static str> {
-    match actor.actor_type {
-        BypassActorType::OrganizationAdmin => Some("OrganizationAdmin"),
-        BypassActorType::RepositoryRole => Some("RepositoryRole"),
-        _ => None,
+fn classify_bypass_actor(actor: &BypassActor) -> BypassActorVerdict<'_> {
+    match &actor.actor_type {
+        BypassActorType::OrganizationAdmin => BypassActorVerdict::Forbidden("OrganizationAdmin"),
+        BypassActorType::RepositoryRole => BypassActorVerdict::Forbidden("RepositoryRole"),
+        BypassActorType::Team | BypassActorType::Integration | BypassActorType::DeployKey => {
+            BypassActorVerdict::Permitted
+        }
+        BypassActorType::Unknown(name) => BypassActorVerdict::Unrecognised(name),
     }
+}
+
+/// A bypass actor that undermines admin enforcement across a set of rulesets. A
+/// definite forbidden actor takes precedence over a merely unrecognised one, so
+/// a concrete failure is reported even when both are present.
+enum AdminBypassProblem<'a> {
+    Forbidden(&'static str),
+    Unrecognised(&'a str),
+}
+
+fn admin_bypass_problem<'a>(
+    rulesets: impl IntoIterator<Item = &'a Ruleset>,
+) -> Option<AdminBypassProblem<'a>> {
+    let mut unrecognised: Option<&'a str> = None;
+    for actor in rulesets
+        .into_iter()
+        .flat_map(|ruleset| ruleset.bypass_actors.iter())
+    {
+        match classify_bypass_actor(actor) {
+            BypassActorVerdict::Forbidden(name) => {
+                return Some(AdminBypassProblem::Forbidden(name));
+            }
+            BypassActorVerdict::Unrecognised(name) => {
+                unrecognised.get_or_insert(name);
+            }
+            BypassActorVerdict::Permitted => {}
+        }
+    }
+    unrecognised.map(AdminBypassProblem::Unrecognised)
 }
 
 fn evaluate_allowed_merge_methods(facts: &RepoFacts, required: &[MergeMethod]) -> RuleResult {
@@ -695,14 +741,16 @@ fn check_enforce_admins(
     if !flag.enabled {
         return;
     }
-    if let Some(actor_type) = rulesets
-        .iter()
-        .flat_map(|ruleset| ruleset.bypass_actors.iter())
-        .find_map(forbidden_bypass_actor_name)
-    {
-        reasons.push(format!(
+    match admin_bypass_problem(rulesets.iter().copied()) {
+        Some(AdminBypassProblem::Forbidden(actor_type)) => reasons.push(format!(
             "legacy `enforce_admins` is enabled but an active branch ruleset allows \
              `{actor_type}` to bypass it",
-        ));
+        )),
+        Some(AdminBypassProblem::Unrecognised(actor_type)) => reasons.push(format!(
+            "legacy `enforce_admins` is enabled but an active branch ruleset has a bypass \
+             actor of unrecognised type `{actor_type}`; refusing to delete since admin \
+             enforcement cannot be verified",
+        )),
+        None => {}
     }
 }

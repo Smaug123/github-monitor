@@ -2037,6 +2037,81 @@ fn ruleset_enforces_admins_fails_when_repository_role_can_bypass() {
 }
 
 #[test]
+fn ruleset_enforces_admins_errors_on_unknown_bypass_actor() {
+    // A bypass-actor class GitHub introduces that we do not model is an unknown
+    // fact: RS004 must not pass it silently. It reports Error, not Pass.
+    let mut facts = base_facts();
+    let mut ruleset = active_branch_ruleset(Vec::new());
+    ruleset.bypass_actors.push(BypassActor {
+        actor_id: Some(9),
+        actor_type: BypassActorType::Unknown("EnterpriseOwner".to_owned()),
+        bypass_mode: BypassMode::Always,
+    });
+    facts.rulesets = vec![ruleset];
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins),
+            &facts
+        ),
+        RuleResult::Error { .. }
+    ));
+}
+
+#[test]
+fn ruleset_enforces_admins_fails_when_admin_and_unknown_both_present() {
+    // A definite forbidden bypass takes precedence over an unrecognised one.
+    let mut facts = base_facts();
+    let mut ruleset = active_branch_ruleset(Vec::new());
+    ruleset.bypass_actors.push(BypassActor {
+        actor_id: Some(9),
+        actor_type: BypassActorType::Unknown("EnterpriseOwner".to_owned()),
+        bypass_mode: BypassMode::Always,
+    });
+    ruleset.bypass_actors.push(BypassActor {
+        actor_id: Some(5),
+        actor_type: BypassActorType::OrganizationAdmin,
+        bypass_mode: BypassMode::Always,
+    });
+    facts.rulesets = vec![ruleset];
+
+    assert!(matches!(
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins),
+            &facts
+        ),
+        RuleResult::Fail { .. }
+    ));
+}
+
+#[test]
+fn ruleset_enforces_admins_passes_with_only_permitted_bypass_actors() {
+    // Team / Integration / DeployKey bypasses are deliberately permitted.
+    let mut facts = base_facts();
+    let mut ruleset = active_branch_ruleset(Vec::new());
+    for actor_type in [
+        BypassActorType::Team,
+        BypassActorType::Integration,
+        BypassActorType::DeployKey,
+    ] {
+        ruleset.bypass_actors.push(BypassActor {
+            actor_id: Some(1),
+            actor_type,
+            bypass_mode: BypassMode::Always,
+        });
+    }
+    facts.rulesets = vec![ruleset];
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins),
+            &facts
+        ),
+        RuleResult::Pass
+    );
+}
+
+#[test]
 fn ruleset_requires_status_check_passes_when_check_exists() {
     let mut facts = base_facts();
     facts.rulesets = vec![active_branch_ruleset(vec![
@@ -3044,6 +3119,27 @@ fn supersedes_rejects_enforce_admins_when_ruleset_allows_bypass() {
     facts.rulesets[0].bypass_actors.push(BypassActor {
         actor_id: Some(1),
         actor_type: BypassActorType::OrganizationAdmin,
+        bypass_mode: BypassMode::Always,
+    });
+    let legacy = fully_covering_legacy();
+
+    let reasons = legacy_protection_superseded_by_rulesets(&legacy, &facts).unwrap_err();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("enforce_admins")),
+        "reasons: {reasons:?}",
+    );
+}
+
+#[test]
+fn supersedes_rejects_enforce_admins_when_ruleset_has_unknown_bypass_actor() {
+    // An unrecognised bypass-actor type means we cannot verify the ruleset
+    // enforces admins, so we must refuse to delete the legacy protection.
+    let mut facts = fully_covering_facts();
+    facts.rulesets[0].bypass_actors.push(BypassActor {
+        actor_id: Some(1),
+        actor_type: BypassActorType::Unknown("EnterpriseOwner".to_owned()),
         bypass_mode: BypassMode::Always,
     });
     let legacy = fully_covering_legacy();
