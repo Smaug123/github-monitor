@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
@@ -1186,11 +1184,91 @@ fn new_pull_request_rule_with_required_defaults() -> RulesetRule {
     })
 }
 
+/// Looks for a pull request this tool already opened for `branch_name`, so a
+/// rerun reuses it instead of opening a duplicate. A lookup failure is a hard
+/// error: proceeding blind could open a second PR, which is the behaviour we are
+/// preventing.
+fn find_existing_pull_request(
+    client: &mut GitHubClient,
+    repo: &RepoRef,
+    branch_name: &str,
+    base_branch: &str,
+) -> Result<Option<PullRequest>, String> {
+    client
+        .find_open_pull_request(repo, branch_name, Some(base_branch))
+        .map_err(|error| {
+            format!("failed to check for an existing pull request in `{repo}`: {error}")
+        })
+}
+
+/// Creates `refs/heads/{branch_name}` at `base_sha`. If the branch already
+/// exists, it is a remnant only when no open PR is attached to it: reset it
+/// (delete + recreate) so the fix starts from a clean branch at the current base
+/// rather than getting stuck on a `422 Reference already exists`. If an open PR
+/// *does* use the branch (e.g. one retargeted to a different base, which the
+/// caller's base-filtered lookup did not surface), deleting it would rewrite that
+/// PR's head, so refuse instead.
+fn create_fresh_branch(
+    client: &mut GitHubClient,
+    repo: &RepoRef,
+    branch_name: &str,
+    base_sha: &str,
+) -> Result<(), String> {
+    let request = CreateGitReference {
+        reference: format!("refs/heads/{branch_name}"),
+        sha: base_sha.to_owned(),
+    };
+    match client.create_git_reference(repo, &request) {
+        Ok(_) => Ok(()),
+        Err(GitHubClientError::UnexpectedStatus {
+            status: 422, body, ..
+        }) if body.contains("already exists") => {
+            if let Some(pull_request) = client
+                .find_open_pull_request(repo, branch_name, None)
+                .map_err(|error| {
+                    format!(
+                        "failed to check whether branch `{branch_name}` backs an open pull \
+                         request in `{repo}`: {error}"
+                    )
+                })?
+            {
+                return Err(format!(
+                    "branch `{branch_name}` already exists in `{repo}` and backs open pull \
+                     request #{} (targeting a different base); refusing to reset it",
+                    pull_request.number
+                ));
+            }
+            client
+                .delete_git_reference(repo, &format!("heads/{branch_name}"))
+                .map_err(|error| {
+                    format!("failed to reset stale branch `{branch_name}` in `{repo}`: {error}")
+                })?;
+            client
+                .create_git_reference(repo, &request)
+                .map(|_| ())
+                .map_err(|error| {
+                    format!("failed to recreate branch `{branch_name}` in `{repo}`: {error}")
+                })
+        }
+        Err(error) => Err(format!(
+            "failed to create branch `{branch_name}` in `{repo}`: {error}"
+        )),
+    }
+}
+
 fn create_workflow_pin_pull_request(
     client: &mut GitHubClient,
     plan: &WorkflowPinPullRequestPlan,
 ) -> Result<PullRequest, String> {
     let branch_name = workflow_pin_branch_name();
+    if let Some(existing) = find_existing_pull_request(
+        client,
+        &plan.repo,
+        &branch_name,
+        &plan.default_branch.to_string(),
+    )? {
+        return Ok(existing);
+    }
     let base_sha = client
         .resolve_commit_sha(&plan.repo, &plan.repo, &plan.default_branch.to_string())
         .map_err(|error| {
@@ -1201,20 +1279,7 @@ fn create_workflow_pin_pull_request(
         })?;
     let prepared_updates = prepare_workflow_updates(client, plan, &base_sha)?;
 
-    client
-        .create_git_reference(
-            &plan.repo,
-            &CreateGitReference {
-                reference: format!("refs/heads/{branch_name}"),
-                sha: base_sha,
-            },
-        )
-        .map_err(|error| {
-            format!(
-                "failed to create branch `{branch_name}` in `{}`: {error}",
-                plan.repo
-            )
-        })?;
+    create_fresh_branch(client, &plan.repo, &branch_name, &base_sha)?;
 
     for update in &prepared_updates {
         let path = NonRootRepoPath::new(&update.path).map_err(|error| {
@@ -1282,6 +1347,14 @@ fn create_add_envrc_pull_request(
     plan: &AddEnvrcPullRequestPlan,
 ) -> Result<PullRequest, String> {
     let branch_name = add_envrc_branch_name();
+    if let Some(existing) = find_existing_pull_request(
+        client,
+        &plan.repo,
+        &branch_name,
+        &plan.default_branch.to_string(),
+    )? {
+        return Ok(existing);
+    }
     let base_sha = client
         .resolve_commit_sha(&plan.repo, &plan.repo, &plan.default_branch.to_string())
         .map_err(|error| {
@@ -1291,20 +1364,7 @@ fn create_add_envrc_pull_request(
             )
         })?;
 
-    client
-        .create_git_reference(
-            &plan.repo,
-            &CreateGitReference {
-                reference: format!("refs/heads/{branch_name}"),
-                sha: base_sha,
-            },
-        )
-        .map_err(|error| {
-            format!(
-                "failed to create branch `{branch_name}` in `{}`: {error}",
-                plan.repo
-            )
-        })?;
+    create_fresh_branch(client, &plan.repo, &branch_name, &base_sha)?;
 
     let path = NonRootRepoPath::new(ENVRC_PATH)
         .map_err(|error| format!("`{ENVRC_PATH}` is not a valid repository path: {error}"))?;
@@ -1374,11 +1434,10 @@ fn add_envrc_pull_request_body() -> String {
 }
 
 fn add_envrc_branch_name() -> String {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("github-infra/add-envrc-{suffix}")
+    // A stable (non-timestamped) branch name is what keeps the fix idempotent:
+    // combined with the open-PR pre-check, a rerun reuses this branch's existing
+    // PR instead of opening a duplicate one every run.
+    "github-infra/add-envrc".to_owned()
 }
 
 fn cleanup_failed_add_envrc_branch(
@@ -1507,11 +1566,8 @@ fn workflow_pin_pull_request_body(updates: &[PreparedWorkflowUpdate]) -> String 
 }
 
 fn workflow_pin_branch_name() -> String {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("github-infra/pin-workflow-actions-{suffix}")
+    // Stable name — see `add_envrc_branch_name`.
+    "github-infra/pin-workflow-actions".to_owned()
 }
 
 fn plan_rule_fix(facts: &RepoFacts, rule: &Rule, output: &RuleOutput) -> Option<PlannedFix> {
@@ -2887,6 +2943,7 @@ mod tests {
         );
         let workflow_content = base64::engine::general_purpose::STANDARD.encode(workflow_yaml);
         let server = TestServer::spawn(vec![
+            expect_no_existing_pull_request("example-org/bad-repo"),
             ExpectedRequest::json(
                 "GET",
                 "/repos/example-org/bad-repo/commits/main",
@@ -2913,11 +2970,9 @@ mod tests {
                 move |body| {
                     let json: serde_json::Value = serde_json::from_str(body).unwrap();
                     assert_eq!(json["sha"], default_branch_sha);
-                    assert!(
-                        json["ref"]
-                            .as_str()
-                            .unwrap()
-                            .starts_with("refs/heads/github-infra/pin-workflow-actions-")
+                    assert_eq!(
+                        json["ref"].as_str().unwrap(),
+                        "refs/heads/github-infra/pin-workflow-actions"
                     );
                 },
                 r#"{"ref":"refs/heads/topic","object":{"sha":"abc123","type":"commit"}}"#
@@ -2929,11 +2984,9 @@ mod tests {
                 move |body| {
                     let json: serde_json::Value = serde_json::from_str(body).unwrap();
                     assert_eq!(json["sha"], "blobsha");
-                    assert!(
-                        json["branch"]
-                            .as_str()
-                            .unwrap()
-                            .starts_with("github-infra/pin-workflow-actions-")
+                    assert_eq!(
+                        json["branch"].as_str().unwrap(),
+                        "github-infra/pin-workflow-actions"
                     );
                     let content = json["content"].as_str().unwrap();
                     let decoded = String::from_utf8(
@@ -2953,11 +3006,9 @@ mod tests {
                     let json: serde_json::Value = serde_json::from_str(body).unwrap();
                     assert_eq!(json["title"], "Pin GitHub Actions to commit SHAs");
                     assert_eq!(json["base"], "main");
-                    assert!(
-                        json["head"]
-                            .as_str()
-                            .unwrap()
-                            .starts_with("github-infra/pin-workflow-actions-")
+                    assert_eq!(
+                        json["head"].as_str().unwrap(),
+                        "github-infra/pin-workflow-actions"
                     );
                     assert!(json["body"].as_str().unwrap().contains(&format!(
                         "actions/checkout@v4` -> `actions/checkout@{resolved_sha} # v4"
@@ -3001,6 +3052,7 @@ mod tests {
         );
         let workflow_content = base64::engine::general_purpose::STANDARD.encode(workflow_yaml);
         let server = TestServer::spawn(vec![
+            expect_no_existing_pull_request("example-org/bad-repo"),
             ExpectedRequest::json(
                 "GET",
                 "/repos/example-org/bad-repo/commits/main",
@@ -3100,6 +3152,7 @@ mod tests {
         let branch_name = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let delete_branch_name = branch_name.clone();
         let server = TestServer::spawn(vec![
+            expect_no_existing_pull_request("example-org/bad-repo"),
             ExpectedRequest::json(
                 "GET",
                 "/repos/example-org/bad-repo/commits/main",
@@ -4921,6 +4974,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(b"use flake\n");
         let expected_envrc_content_for_assert = expected_envrc_content.clone();
         let server = TestServer::spawn(vec![
+            expect_no_existing_pull_request("example-org/repo"),
             ExpectedRequest::json(
                 "GET",
                 "/repos/example-org/repo/commits/main",
@@ -4933,11 +4987,9 @@ mod tests {
                 move |body| {
                     let json: serde_json::Value = serde_json::from_str(body).unwrap();
                     assert_eq!(json["sha"], default_branch_sha);
-                    assert!(
-                        json["ref"]
-                            .as_str()
-                            .unwrap()
-                            .starts_with("refs/heads/github-infra/add-envrc-")
+                    assert_eq!(
+                        json["ref"].as_str().unwrap(),
+                        "refs/heads/github-infra/add-envrc"
                     );
                 },
                 r#"{"ref":"refs/heads/topic","object":{"sha":"abc123","type":"commit"}}"#
@@ -4953,12 +5005,7 @@ mod tests {
                         json.get("sha").is_none(),
                         "PUT body for new file must omit sha; got {body}"
                     );
-                    assert!(
-                        json["branch"]
-                            .as_str()
-                            .unwrap()
-                            .starts_with("github-infra/add-envrc-")
-                    );
+                    assert_eq!(json["branch"].as_str().unwrap(), "github-infra/add-envrc");
                     assert_eq!(json["message"], "Add `.envrc`");
                 },
                 "{}".to_owned(),
@@ -4970,12 +5017,7 @@ mod tests {
                     let json: serde_json::Value = serde_json::from_str(body).unwrap();
                     assert_eq!(json["title"], "Add `.envrc`");
                     assert_eq!(json["base"], "main");
-                    assert!(
-                        json["head"]
-                            .as_str()
-                            .unwrap()
-                            .starts_with("github-infra/add-envrc-")
-                    );
+                    assert_eq!(json["head"].as_str().unwrap(), "github-infra/add-envrc");
                     assert!(json["body"].as_str().unwrap().contains("use flake"));
                 },
                 r#"{"number":99,"html_url":"https://example.test/pr/99"}"#.to_owned(),
@@ -4993,6 +5035,194 @@ mod tests {
     }
 
     #[test]
+    fn execute_repo_fixes_reuses_existing_open_pull_request_for_add_envrc() {
+        // Idempotency: when a github-infra PR is already open for the stable
+        // branch, the fix must reuse it — no branch or PR is created. The mock
+        // server declares ONLY the open-PR lookup, so any further request (a
+        // duplicate branch/PR) would be an unexpected connection and fail.
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
+        let server = TestServer::spawn(vec![ExpectedRequest::with_status_and_path_assertion(
+            "GET",
+            |path| {
+                assert!(
+                    path.starts_with("/repos/example-org/repo/pulls?"),
+                    "unexpected open-PR lookup path: {path}"
+                );
+                assert!(path.contains("state=open"), "expected state=open: {path}");
+                // Must scope to the base branch the fix targets, so a PR
+                // retargeted to a different base is not wrongly reused.
+                assert!(path.contains("base=main"), "expected base=main: {path}");
+            },
+            |_| {},
+            200,
+            r#"[{"number":7,"html_url":"https://example.test/pr/7"}]"#.to_owned(),
+        )]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_resets_leftover_branch_with_no_open_pull_request() {
+        // Stable branch names mean a branch can survive a prior aborted run (or a
+        // PR closed without deleting it). With no open PR, creating the ref 422s
+        // ("Reference already exists"); the fix must reset the stale branch and
+        // proceed rather than get stuck.
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
+        let default_branch_sha = "fedcba9876543210fedcba9876543210fedcba98";
+        let server = TestServer::spawn(vec![
+            expect_no_existing_pull_request("example-org/repo"),
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/commits/main",
+                |_| {},
+                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
+            ),
+            ExpectedRequest::with_status_and_path_assertion(
+                "POST",
+                |path| assert_eq!(path, "/repos/example-org/repo/git/refs"),
+                |_| {},
+                422,
+                r#"{"message":"Reference already exists"}"#.to_owned(),
+            ),
+            // Safety check before resetting: is any open PR (any base) attached
+            // to the branch? None here, so the reset proceeds.
+            ExpectedRequest::with_status_and_path_assertion(
+                "GET",
+                |path| {
+                    assert!(
+                        path.starts_with("/repos/example-org/repo/pulls?"),
+                        "unexpected safety-check path: {path}"
+                    );
+                    assert!(
+                        !path.contains("base="),
+                        "safety check must not filter by base: {path}"
+                    );
+                },
+                |_| {},
+                200,
+                "[]".to_owned(),
+            ),
+            ExpectedRequest::with_status_and_path_assertion(
+                "DELETE",
+                |path| {
+                    assert_eq!(
+                        path,
+                        "/repos/example-org/repo/git/refs/heads/github-infra/add-envrc"
+                    )
+                },
+                |_| {},
+                204,
+                String::new(),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/repo/git/refs",
+                move |body| {
+                    let json: serde_json::Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(
+                        json["ref"].as_str().unwrap(),
+                        "refs/heads/github-infra/add-envrc"
+                    );
+                },
+                r#"{"ref":"refs/heads/topic","object":{"sha":"abc123","type":"commit"}}"#
+                    .to_owned(),
+            ),
+            ExpectedRequest::json(
+                "PUT",
+                "/repos/example-org/repo/contents/.envrc",
+                |_| {},
+                "{}".to_owned(),
+            ),
+            ExpectedRequest::json(
+                "POST",
+                "/repos/example-org/repo/pulls",
+                |_| {},
+                r#"{"number":100,"html_url":"https://example.test/pr/100"}"#.to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].status, FixStatus::Applied);
+    }
+
+    #[test]
+    fn execute_repo_fixes_refuses_to_reset_branch_backing_another_open_pull_request() {
+        // The stable branch already exists and backs an open PR that was
+        // retargeted to a different base (so the base-filtered pre-check missed
+        // it). Deleting the branch would rewrite that PR's head, so the fix must
+        // refuse rather than reset.
+        let facts = base_facts();
+        let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
+        let default_branch_sha = "fedcba9876543210fedcba9876543210fedcba98";
+        let server = TestServer::spawn(vec![
+            expect_no_existing_pull_request("example-org/repo"),
+            ExpectedRequest::json(
+                "GET",
+                "/repos/example-org/repo/commits/main",
+                |_| {},
+                format!(r#"{{"sha":"{default_branch_sha}"}}"#),
+            ),
+            ExpectedRequest::with_status_and_path_assertion(
+                "POST",
+                |path| assert_eq!(path, "/repos/example-org/repo/git/refs"),
+                |_| {},
+                422,
+                r#"{"message":"Reference already exists"}"#.to_owned(),
+            ),
+            // Safety check finds a PR attached to the branch → the fix must not
+            // delete it. No DELETE or further requests follow.
+            ExpectedRequest::with_status_and_path_assertion(
+                "GET",
+                |path| {
+                    assert!(
+                        path.starts_with("/repos/example-org/repo/pulls?"),
+                        "unexpected safety-check path: {path}"
+                    );
+                    assert!(
+                        !path.contains("base="),
+                        "safety check must not filter by base: {path}"
+                    );
+                },
+                |_| {},
+                200,
+                r#"[{"number":13,"html_url":"https://example.test/pr/13"}]"#.to_owned(),
+            ),
+        ]);
+        let mut client = GitHubClient::with_base_url(
+            crate::github::client::GitHubToken::new("token"),
+            server.base_url(),
+        );
+
+        let executed = execute_repo_fixes(&mut client, &fixes);
+
+        assert_eq!(executed.len(), 1);
+        match &executed[0].status {
+            FixStatus::Failed { reason } => {
+                assert!(
+                    reason.contains("backs open pull request #13"),
+                    "unexpected failure reason: {reason}"
+                );
+            }
+            other => panic!("expected failed status, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn execute_repo_fixes_deletes_temporary_branch_after_envrc_pull_request_failure() {
         let facts = base_facts();
         let fixes = plan_repo_fixes(&[fl001_rule()], &facts);
@@ -5000,6 +5230,7 @@ mod tests {
         let branch_name = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let delete_branch_name = branch_name.clone();
         let server = TestServer::spawn(vec![
+            expect_no_existing_pull_request("example-org/repo"),
             ExpectedRequest::json(
                 "GET",
                 "/repos/example-org/repo/commits/main",
@@ -5114,6 +5345,24 @@ mod tests {
                 response_body,
             }
         }
+    }
+
+    // The open-PR pre-check every PR-opening fix now performs first. Returns an
+    // empty list so the fix proceeds to open a new PR.
+    fn expect_no_existing_pull_request(repo_path: &'static str) -> ExpectedRequest {
+        ExpectedRequest::with_status_and_path_assertion(
+            "GET",
+            move |path| {
+                assert!(
+                    path.starts_with(&format!("/repos/{repo_path}/pulls?")),
+                    "unexpected open-PR lookup path: {path}"
+                );
+                assert!(path.contains("state=open"), "expected state=open: {path}");
+            },
+            |_| {},
+            200,
+            "[]".to_owned(),
+        )
     }
 
     struct TestServer {
