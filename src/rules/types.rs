@@ -67,13 +67,9 @@ impl RepoSetting {
             Self::AllowUpdateBranch => {
                 SettingValue::from_optional_bool(settings.allow_update_branch)
             }
-            Self::AllowSquashMerge => {
-                SettingValue::from_optional_bool(settings.allow_squash_merge)
-            }
+            Self::AllowSquashMerge => SettingValue::from_optional_bool(settings.allow_squash_merge),
             Self::AllowMergeCommit => SettingValue::from_optional_bool(settings.allow_merge_commit),
-            Self::AllowRebaseMerge => {
-                SettingValue::from_optional_bool(settings.allow_rebase_merge)
-            }
+            Self::AllowRebaseMerge => SettingValue::from_optional_bool(settings.allow_rebase_merge),
             Self::ForkPrApprovalPolicy => match &settings.fork_pr_approval_policy {
                 Gathered::Present(policy) => {
                     SettingValue::ForkPrApprovalPolicy(Some(policy.clone()))
@@ -122,9 +118,9 @@ impl SettingValue {
     pub(crate) fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(value) => Some(*value),
-            Self::Unknown
-            | Self::ForkPrApprovalPolicy(_)
-            | Self::DefaultWorkflowPermissions(_) => None,
+            Self::Unknown | Self::ForkPrApprovalPolicy(_) | Self::DefaultWorkflowPermissions(_) => {
+                None
+            }
         }
     }
 }

@@ -6,8 +6,8 @@ use crate::workflow::model::{ActionReference, Job, Step, Workflow};
 
 use serde::{Deserialize, Serialize};
 
-use super::glob::{branch_matches_filters, branch_pattern_matches};
 use super::RuleResult;
+use super::glob::{branch_matches_filters, branch_pattern_matches};
 
 const REQUIRED_CHECKS_JOB_NAME: &str = "all-required-checks-complete";
 const REQUIRED_CHECKS_ACTION: &str = "G-Research/common-actions/check-required-lite";
@@ -15,16 +15,12 @@ const REQUIRED_CHECKS_ACTION: &str = "G-Research/common-actions/check-required-l
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WorkflowCheck {
     WorkflowExistsForDefaultBranch,
-    WorkflowHasJob {
-        job_name: String,
-    },
+    WorkflowHasJob { job_name: String },
     WorkflowActionsPinnedToSha,
     NoPullRequestTargetWithCheckout,
     NoWorkflowRunTrigger,
     NoPullRequestSecretReferences,
-    WorkflowUsesAction {
-        action: String,
-    },
+    WorkflowUsesAction { action: String },
     WorkflowHasRequiredChecksComplete,
 }
 
@@ -155,7 +151,9 @@ pub(super) fn evaluate(rule: &WorkflowCheck, facts: &RepoFacts) -> RuleResult {
                 }
             }
         }
-        WorkflowCheck::WorkflowHasRequiredChecksComplete => evaluate_required_checks_complete(facts),
+        WorkflowCheck::WorkflowHasRequiredChecksComplete => {
+            evaluate_required_checks_complete(facts)
+        }
         WorkflowCheck::NoPullRequestSecretReferences => evaluate_pr_secrets(facts),
     }
 }

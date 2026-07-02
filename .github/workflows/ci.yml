@@ -19,8 +19,14 @@ jobs:
       - name: Build
         run: nix build
 
+      - name: Format
+        run: nix develop --command cargo fmt --check
+
       - name: Test
         run: nix develop --command cargo test
+
+      - name: Clippy
+        run: nix develop --command cargo clippy
 
   all-required-checks-complete:
     needs: [build-and-test]

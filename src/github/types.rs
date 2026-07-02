@@ -610,10 +610,7 @@ mod tests {
             with_false[field] = serde_json::Value::Bool(false);
 
             let mut without = with_false.clone();
-            without
-                .as_object_mut()
-                .expect("object")
-                .remove(field);
+            without.as_object_mut().expect("object").remove(field);
 
             let explicit_false = serde_json::from_value::<Repository>(with_false);
             let absent = serde_json::from_value::<Repository>(without);
@@ -1014,7 +1011,9 @@ mod tests {
         let body = serde_json::to_value(UpdateRulesetRequest::from_ruleset(&ruleset))
             .expect("write body must serialize");
 
-        let rules = body["rules"].as_array().expect("write body has a rules array");
+        let rules = body["rules"]
+            .as_array()
+            .expect("write body has a rules array");
         let params_of = |rule_type: &str| -> serde_json::Value {
             rules
                 .iter()

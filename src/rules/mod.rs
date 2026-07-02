@@ -12,10 +12,10 @@ mod workflows;
 pub use self::catalog::default_rules;
 pub use self::catalog::rules_for_repo;
 pub use self::files::FileCheck;
+pub use self::rulesets::RulesetCheck;
 pub(crate) use self::rulesets::{
     active_branch_rulesets_for_default_branch, legacy_protection_superseded_by_rulesets,
 };
-pub use self::rulesets::RulesetCheck;
 pub use self::settings::SettingCheck;
 pub use self::types::{
     RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,

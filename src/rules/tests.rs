@@ -48,11 +48,15 @@ fn fork_pr_approval_policy_strategy() -> impl Strategy<Value = Gathered<ForkPrAp
     prop_oneof![
         Just(Gathered::Absent),
         Just(Gathered::Unknown),
-        Just(Gathered::Present(ForkPrApprovalPolicy::AllExternalContributors)),
+        Just(Gathered::Present(
+            ForkPrApprovalPolicy::AllExternalContributors
+        )),
         Just(Gathered::Present(
             ForkPrApprovalPolicy::FirstTimeContributorsNewToGithub
         )),
-        Just(Gathered::Present(ForkPrApprovalPolicy::FirstTimeContributors)),
+        Just(Gathered::Present(
+            ForkPrApprovalPolicy::FirstTimeContributors
+        )),
     ]
 }
 
@@ -450,29 +454,50 @@ fn rule_kind_strategy() -> impl Strategy<Value = RuleKind> {
             RuleKind::Ruleset(RulesetCheck::RulesetRequiresStatusCheck { check_name, source })
         }),
         Just(RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins)),
-        Just(RuleKind::Ruleset(RulesetCheck::RulesetRequiresLinearHistory)),
+        Just(RuleKind::Ruleset(
+            RulesetCheck::RulesetRequiresLinearHistory
+        )),
         Just(RuleKind::Ruleset(RulesetCheck::RulesetPreventsForcePush)),
         Just(RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions)),
-        Just(RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits)),
+        Just(RuleKind::Ruleset(
+            RulesetCheck::RulesetRequiresSignedCommits
+        )),
         Just(RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest)),
-        proptest::collection::vec(merge_method_strategy(), 0..4)
-            .prop_map(|allowed| RuleKind::Ruleset(RulesetCheck::RulesetRestrictsMergeMethods { allowed })),
-        Just(RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks)),
-        Just(RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection)),
-        Just(RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch)),
-        identifier().prop_map(|job_name| RuleKind::Workflow(WorkflowCheck::WorkflowHasJob { job_name })),
-        Just(RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha)),
-        Just(RuleKind::Workflow(WorkflowCheck::NoPullRequestTargetWithCheckout)),
+        proptest::collection::vec(merge_method_strategy(), 0..4).prop_map(|allowed| {
+            RuleKind::Ruleset(RulesetCheck::RulesetRestrictsMergeMethods { allowed })
+        }),
+        Just(RuleKind::Ruleset(
+            RulesetCheck::RulesetRequiresStrictStatusChecks
+        )),
+        Just(RuleKind::Ruleset(
+            RulesetCheck::UsesRulesetsNotLegacyProtection
+        )),
+        Just(RuleKind::Workflow(
+            WorkflowCheck::WorkflowExistsForDefaultBranch
+        )),
+        identifier()
+            .prop_map(|job_name| RuleKind::Workflow(WorkflowCheck::WorkflowHasJob { job_name })),
+        Just(RuleKind::Workflow(
+            WorkflowCheck::WorkflowActionsPinnedToSha
+        )),
+        Just(RuleKind::Workflow(
+            WorkflowCheck::NoPullRequestTargetWithCheckout
+        )),
         Just(RuleKind::Workflow(WorkflowCheck::NoWorkflowRunTrigger)),
-        (identifier(), identifier()).prop_map(|(owner, repo)| RuleKind::Workflow(WorkflowCheck::WorkflowUsesAction {
-            action: format!("{owner}/{repo}"),
-        })),
-        Just(RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete)),
+        (identifier(), identifier()).prop_map(|(owner, repo)| RuleKind::Workflow(
+            WorkflowCheck::WorkflowUsesAction {
+                action: format!("{owner}/{repo}"),
+            }
+        )),
+        Just(RuleKind::Workflow(
+            WorkflowCheck::WorkflowHasRequiredChecksComplete
+        )),
         path_fragment().prop_map(|path| RuleKind::File(FileCheck::FileExists { path })),
         Just(RuleKind::File(FileCheck::NixFlakeExists)),
         Just(RuleKind::File(FileCheck::NixFlakeHasCheck)),
-        (repo_setting_strategy(), setting_value_strategy())
-            .prop_map(|(setting, expected)| RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, expected })),
+        (repo_setting_strategy(), setting_value_strategy()).prop_map(|(setting, expected)| {
+            RuleKind::Setting(SettingCheck::RepoSettingMatch { setting, expected })
+        }),
         identifier().prop_map(|name| RuleKind::Setting(SettingCheck::DefaultBranchNameIs { name })),
     ]
 }
@@ -1250,7 +1275,10 @@ fn uses_rulesets_not_legacy_protection_passes_when_default_branch_has_no_legacy_
     let facts = base_facts();
 
     assert_eq!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -1261,7 +1289,10 @@ fn uses_rulesets_not_legacy_protection_fails_when_legacy_protection_present() {
     facts.legacy_branch_protection = Gathered::Present(BranchProtection::default());
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1273,7 +1304,10 @@ fn uses_rulesets_not_legacy_protection_errors_when_protection_unknown() {
     // was unreadable): neither Pass nor Fail is justified.
     facts.legacy_branch_protection = Gathered::Unknown;
 
-    let result = evaluate(&RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection), &facts);
+    let result = evaluate(
+        &RuleKind::Ruleset(RulesetCheck::UsesRulesetsNotLegacyProtection),
+        &facts,
+    );
     assert!(
         matches!(result, RuleResult::Error { .. }),
         "unknown legacy protection must Error, not pass/fail vacuously; got {result:?}",
@@ -1307,7 +1341,10 @@ fn workflow_exists_for_default_branch_respects_single_star_slash_boundaries() {
     }];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1339,7 +1376,10 @@ fn workflow_exists_for_default_branch_supports_double_star_and_negation_order() 
     }];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1370,7 +1410,10 @@ fn workflow_exists_for_default_branch_respects_branches_ignore() {
     }];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1427,7 +1470,10 @@ fn workflow_exists_for_default_branch_ignores_tags_only_push_workflows() {
     }];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowExistsForDefaultBranch),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1443,7 +1489,10 @@ fn workflow_actions_pinned_to_sha_fails_for_subdir_action_with_at_in_ref() {
     )];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1460,7 +1509,10 @@ fn wf002_passes_for_pinned_reusable_workflow() {
     )];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -1473,7 +1525,10 @@ fn wf002_fails_for_unpinned_reusable_workflow() {
         ActionReference::Other("owner/repo/.github/workflows/x.yml@main".to_owned()),
     )];
 
-    let result = evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha), &facts);
+    let result = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
+        &facts,
+    );
     let RuleResult::Fail { reason } = result else {
         panic!("expected Fail, got {result:?}");
     };
@@ -1511,7 +1566,10 @@ fn wf002_fails_when_reusable_pin_is_unpinned_alongside_pinned_steps() {
     ];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1525,7 +1583,10 @@ fn no_workflow_run_trigger_passes_when_absent() {
     )];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoWorkflowRunTrigger), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoWorkflowRunTrigger),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -1549,7 +1610,10 @@ fn no_workflow_run_trigger_fails_when_present() {
         },
     }];
 
-    let RuleResult::Fail { reason } = evaluate(&RuleKind::Workflow(WorkflowCheck::NoWorkflowRunTrigger), &facts) else {
+    let RuleResult::Fail { reason } = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::NoWorkflowRunTrigger),
+        &facts,
+    ) else {
         panic!("expected Fail");
     };
     assert!(
@@ -1584,7 +1648,10 @@ fn no_workflow_run_trigger_fails_irrespective_of_jobs_or_checkout() {
     }];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoWorkflowRunTrigger), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoWorkflowRunTrigger),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1607,7 +1674,10 @@ fn wf006_passes_when_no_pr_triggers() {
     )];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
         RuleResult::Pass,
     );
 }
@@ -1622,7 +1692,10 @@ fn wf006_passes_for_pr_workflow_with_no_secrets() {
     )];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
         RuleResult::Pass,
     );
 }
@@ -1637,8 +1710,10 @@ fn wf006_fails_for_pull_request_step_env_secret() {
          env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
     )];
 
-    let RuleResult::Fail { reason } = evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts)
-    else {
+    let RuleResult::Fail { reason } = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+        &facts,
+    ) else {
         panic!("expected Fail");
     };
     assert!(reason.contains(".github/workflows/pr.yml"), "{reason}");
@@ -1656,7 +1731,10 @@ fn wf006_fails_for_pull_request_target_step_env_secret() {
     )];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1671,8 +1749,10 @@ fn wf006_fails_for_secret_in_step_with_argument() {
          with:\n          token: ${{ secrets.MY_TOKEN }}\n",
     )];
 
-    let RuleResult::Fail { reason } = evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts)
-    else {
+    let RuleResult::Fail { reason } = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+        &facts,
+    ) else {
         panic!("expected Fail");
     };
     assert!(reason.contains("secrets.MY_TOKEN"), "{reason}");
@@ -1688,7 +1768,10 @@ fn wf006_fails_for_secret_in_run_script() {
     )];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1702,8 +1785,10 @@ fn wf006_fails_for_workflow_level_env_secret() {
          jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr list\n",
     )];
 
-    let RuleResult::Fail { reason } = evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts)
-    else {
+    let RuleResult::Fail { reason } = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+        &facts,
+    ) else {
         panic!("expected Fail");
     };
     assert!(reason.contains("secrets.GITHUB_TOKEN"), "{reason}");
@@ -1719,7 +1804,10 @@ fn wf006_fails_for_secret_in_step_if_condition() {
     )];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1734,7 +1822,10 @@ fn wf006_ignores_outputs_secrets_member_access() {
     )];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
         RuleResult::Pass,
     );
 }
@@ -1758,8 +1849,10 @@ fn wf006_skips_when_raw_yaml_unavailable_on_pr_workflow() {
         },
     }];
 
-    let RuleResult::Skip { reason } = evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts)
-    else {
+    let RuleResult::Skip { reason } = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+        &facts,
+    ) else {
         panic!("expected Skip");
     };
     assert!(reason.contains(".github/workflows/pr.yml"), "{reason}");
@@ -1792,7 +1885,10 @@ fn wf006_fail_dominates_skip() {
     ];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::NoPullRequestSecretReferences),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1903,7 +1999,10 @@ fn ruleset_enforces_admins_fails_when_admins_can_bypass() {
     facts.rulesets = vec![ruleset];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -1920,7 +2019,10 @@ fn ruleset_enforces_admins_fails_when_repository_role_can_bypass() {
     facts.rulesets = vec![ruleset];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetEnforcesAdmins),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2058,7 +2160,10 @@ fn ruleset_with_default_branch_token_applies_to_default_branch() {
     });
     facts.rulesets = vec![ruleset];
 
-    assert_eq!(evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts), RuleResult::Pass);
+    assert_eq!(
+        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+        RuleResult::Pass
+    );
 }
 
 #[test]
@@ -2074,7 +2179,10 @@ fn ruleset_with_all_token_applies_to_any_branch() {
     });
     facts.rulesets = vec![ruleset];
 
-    assert_eq!(evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts), RuleResult::Pass);
+    assert_eq!(
+        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+        RuleResult::Pass
+    );
 }
 
 #[test]
@@ -2165,7 +2273,10 @@ fn workflow_has_required_checks_complete_passes_for_canonical_shape() {
     )];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -2179,7 +2290,10 @@ fn workflow_has_required_checks_complete_tolerates_extra_whitespace() {
     )];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -2192,7 +2306,10 @@ fn workflow_has_required_checks_complete_fails_when_job_absent() {
         vec![check_required_lite_step()],
     )];
 
-    let result = evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts);
+    let result = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+        &facts,
+    );
     let RuleResult::Fail { reason } = result else {
         panic!("expected Fail, got {result:?}");
     };
@@ -2210,7 +2327,10 @@ fn workflow_has_required_checks_complete_fails_when_action_missing() {
         vec![run_step("echo done")],
     )];
 
-    let result = evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts);
+    let result = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+        &facts,
+    );
     let RuleResult::Fail { reason } = result else {
         panic!("expected Fail, got {result:?}");
     };
@@ -2228,7 +2348,10 @@ fn workflow_has_required_checks_complete_fails_when_if_condition_missing() {
         vec![check_required_lite_step()],
     )];
 
-    let result = evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts);
+    let result = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+        &facts,
+    );
     let RuleResult::Fail { reason } = result else {
         panic!("expected Fail, got {result:?}");
     };
@@ -2246,7 +2369,10 @@ fn workflow_has_required_checks_complete_fails_for_wrong_if_condition() {
         vec![check_required_lite_step()],
     )];
 
-    let result = evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts);
+    let result = evaluate(
+        &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+        &facts,
+    );
     let RuleResult::Fail { reason } = result else {
         panic!("expected Fail, got {result:?}");
     };
@@ -2265,7 +2391,10 @@ fn workflow_has_required_checks_complete_rejects_bare_always_without_wrapper() {
     )];
 
     assert!(matches!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2303,7 +2432,10 @@ fn workflow_has_required_checks_complete_passes_when_one_of_many_jobs_matches() 
     ];
 
     assert_eq!(
-        evaluate(&RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete), &facts),
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -2315,7 +2447,10 @@ fn ruleset_without_conditions_is_treated_as_applying() {
     ruleset.conditions = None;
     facts.rulesets = vec![ruleset];
 
-    assert_eq!(evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts), RuleResult::Pass);
+    assert_eq!(
+        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetExists), &facts),
+        RuleResult::Pass
+    );
 }
 
 fn pull_request_rule_with_methods(methods: Vec<MergeMethod>) -> RulesetRule {
@@ -2351,7 +2486,10 @@ fn ruleset_restricts_deletions_passes_when_rule_present() {
     }])];
 
     assert_eq!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -2362,7 +2500,10 @@ fn ruleset_restricts_deletions_fails_when_rule_absent() {
     facts.rulesets = vec![active_branch_ruleset(Vec::new())];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2372,7 +2513,10 @@ fn ruleset_restricts_deletions_fails_when_no_active_ruleset() {
     let facts = base_facts();
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRestrictsDeletions),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2386,7 +2530,10 @@ fn ruleset_requires_signed_commits_passes_when_rule_present() {
     }])];
 
     assert_eq!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -2397,7 +2544,10 @@ fn ruleset_requires_signed_commits_fails_when_rule_absent() {
     facts.rulesets = vec![active_branch_ruleset(Vec::new())];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresSignedCommits),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2410,7 +2560,10 @@ fn ruleset_requires_pull_request_passes_when_rule_present() {
     )])];
 
     assert_eq!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -2421,7 +2574,10 @@ fn ruleset_requires_pull_request_fails_when_rule_absent() {
     facts.rulesets = vec![active_branch_ruleset(Vec::new())];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresPullRequest),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2504,7 +2660,10 @@ fn ruleset_requires_strict_status_checks_passes_with_strict_true() {
     )])];
 
     assert_eq!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks),
+            &facts
+        ),
         RuleResult::Pass
     );
 }
@@ -2517,7 +2676,10 @@ fn ruleset_requires_strict_status_checks_fails_with_strict_false() {
     )])];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2530,7 +2692,10 @@ fn ruleset_requires_strict_status_checks_fails_with_strict_none() {
     )])];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
@@ -2541,7 +2706,10 @@ fn ruleset_requires_strict_status_checks_fails_without_required_status_checks_ru
     facts.rulesets = vec![active_branch_ruleset(Vec::new())];
 
     assert!(matches!(
-        evaluate(&RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks), &facts),
+        evaluate(
+            &RuleKind::Ruleset(RulesetCheck::RulesetRequiresStrictStatusChecks),
+            &facts
+        ),
         RuleResult::Fail { .. }
     ));
 }
