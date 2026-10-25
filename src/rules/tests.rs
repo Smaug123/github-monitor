@@ -17,7 +17,7 @@ use crate::github::types::{
 use crate::types::{BranchName, Gathered, RepoRef, RuleId};
 use crate::workflow::model::{
     ActionRef, ActionReference, ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step,
-    StepKind, TriggerFilter, Triggers, Workflow, WorkflowDispatch, WorkflowRun,
+    StepKind, TriggerFilter, Triggers, WithValue, Workflow, WorkflowDispatch, WorkflowRun,
 };
 
 fn reason() -> impl Strategy<Value = String> {
@@ -298,6 +298,8 @@ fn trigger_filter_strategy() -> impl Strategy<Value = TriggerFilter> {
                 tags,
                 tags_ignore,
                 paths,
+                paths_ignore: Vec::new(),
+                types: Vec::new(),
             },
         )
 }
@@ -369,8 +371,10 @@ fn workflow_strategy() -> impl Strategy<Value = Workflow> {
                         (
                             name,
                             Job {
+                                name: None,
                                 needs: Vec::new(),
                                 condition: None,
+                                strategy: None,
                                 kind: JobKind::Standard(StandardJob {
                                     runs_on: None,
                                     steps,
@@ -662,6 +666,8 @@ fn workflow_with_single_job_kind(job_name: &str, kind: JobKind) -> WorkflowFile 
                     tags: Vec::new(),
                     tags_ignore: Vec::new(),
                     paths: Vec::new(),
+                    paths_ignore: Vec::new(),
+                    types: Vec::new(),
                 }),
                 pull_request: None,
                 pull_request_target: None,
@@ -671,8 +677,10 @@ fn workflow_with_single_job_kind(job_name: &str, kind: JobKind) -> WorkflowFile 
             jobs: BTreeMap::from([(
                 job_name.to_owned(),
                 Job {
+                    name: None,
                     needs: Vec::new(),
                     condition: None,
+                    strategy: None,
                     kind,
                 },
             )]),
@@ -1388,6 +1396,8 @@ fn workflow_exists_for_default_branch_respects_single_star_slash_boundaries() {
                     tags: Vec::new(),
                     tags_ignore: Vec::new(),
                     paths: Vec::new(),
+                    paths_ignore: Vec::new(),
+                    types: Vec::new(),
                 }),
                 pull_request: None,
                 pull_request_target: None,
@@ -1423,6 +1433,8 @@ fn workflow_exists_for_default_branch_supports_double_star_and_negation_order() 
                     tags: Vec::new(),
                     tags_ignore: Vec::new(),
                     paths: Vec::new(),
+                    paths_ignore: Vec::new(),
+                    types: Vec::new(),
                 }),
                 pull_request: None,
                 pull_request_target: None,
@@ -1457,6 +1469,8 @@ fn workflow_exists_for_default_branch_respects_branches_ignore() {
                     tags: Vec::new(),
                     tags_ignore: Vec::new(),
                     paths: Vec::new(),
+                    paths_ignore: Vec::new(),
+                    types: Vec::new(),
                 }),
                 pull_request: None,
                 pull_request_target: None,
@@ -1517,6 +1531,8 @@ fn workflow_exists_for_default_branch_ignores_tags_only_push_workflows() {
                     tags: vec!["v*".to_owned()],
                     tags_ignore: Vec::new(),
                     paths: Vec::new(),
+                    paths_ignore: Vec::new(),
+                    types: Vec::new(),
                 }),
                 pull_request: None,
                 pull_request_target: None,
@@ -1633,6 +1649,143 @@ fn wf002_fails_when_reusable_pin_is_unpinned_alongside_pinned_steps() {
 }
 
 #[test]
+fn wf002_fails_for_unpinned_reusable_workflow_with_non_string_inputs() {
+    // Regression: a float or null input used to turn the call into an empty
+    // standard job, so its unpinned `uses:` never reached WF002.
+    for input in ["1.5", "", "null"] {
+        let mut facts = base_facts();
+        facts.workflows = vec![workflow_from_raw(
+            ".github/workflows/call.yml",
+            &format!(
+                "on: push\njobs:\n  call:\n    uses: evil/repo/.github/workflows/x.yml@main\n    \
+                 with:\n      v: {input}\n"
+            ),
+        )];
+
+        let result = evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
+            &facts,
+        );
+        assert!(
+            matches!(&result, RuleResult::Fail { reason } if reason.contains("evil/repo")),
+            "input `{input}`: expected WF002 to fail on the unpinned call, got {result:?}"
+        );
+    }
+}
+
+/// `docker://` action references: with or without a registry (including one
+/// with a port, whose `:` is not a tag separator), tag, and digest, where the
+/// digest may be malformed.
+fn docker_reference_strategy() -> impl Strategy<Value = String> {
+    let image = prop_oneof![
+        Just("alpine"),
+        Just("ghcr.io/owner/image"),
+        Just("registry.example:5000/team/image"),
+    ];
+    let tag = proptest::option::of(prop_oneof![Just("latest"), Just("3.19")]);
+    let digest = proptest::option::of(prop_oneof![
+        "[0-9a-f]{64}".prop_map(|hex| format!("sha256:{hex}")),
+        "[0-9a-f]{63}".prop_map(|hex| format!("sha256:{hex}")),
+        "[0-9A-F]{64}".prop_map(|hex| format!("sha256:{hex}")),
+        "[0-9a-f]{64}".prop_map(|hex| format!("md5:{hex}")),
+    ]);
+    (image, tag, digest).prop_map(|(image, tag, digest)| {
+        let mut reference = format!("docker://{image}");
+        if let Some(tag) = tag {
+            reference.push_str(&format!(":{tag}"));
+        }
+        if let Some(digest) = digest {
+            reference.push_str(&format!("@{digest}"));
+        }
+        reference
+    })
+}
+
+/// Reference: a `docker://` action is immutable iff it names its image by a
+/// sha256 content digest (64 lowercase hex digits), whether or not it also
+/// carries a tag. A tag alone can be re-pointed at any time.
+fn reference_docker_reference_is_pinned(reference: &str) -> bool {
+    regex::Regex::new(r"^docker://[^@]+@sha256:[0-9a-f]{64}$")
+        .unwrap()
+        .is_match(reference)
+}
+
+proptest! {
+    // About 7% of generated CI shapes have an enforcing aggregator; enough
+    // cases that WF004's pass side is exercised dozens of times per run.
+    #![proptest_config(ProptestConfig::with_cases(1024))]
+
+    #[test]
+    fn wf002_passes_for_docker_actions_iff_pinned_by_digest(
+        reference in docker_reference_strategy(),
+    ) {
+        let mut facts = base_facts();
+        facts.workflows = vec![workflow_with_single_job(
+            "build",
+            vec![action_step(ActionReference::Other(reference.clone()))],
+        )];
+
+        let result = evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowActionsPinnedToSha),
+            &facts,
+        );
+        prop_assert_eq!(
+            result == RuleResult::Pass,
+            reference_docker_reference_is_pinned(&reference),
+            "{} -> {:?}",
+            reference,
+            result
+        );
+    }
+
+    /// WF004 must accept exactly the aggregators that enforce: reported on
+    /// every pull request into the default branch under the name the ruleset
+    /// requires, run even when other jobs fail, needing every other job, and
+    /// handing the gate action the full `needs` context.
+    #[test]
+    fn wf004_passes_iff_the_aggregator_enforces_on_every_pull_request(
+        shape in crate::workflow::ci_shapes::ci_shape(),
+    ) {
+        let yaml = shape.yaml();
+        let mut facts = base_facts();
+        facts.workflows = vec![workflow_from_raw(".github/workflows/ci.yml", &yaml)];
+
+        let result = evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+            &facts,
+        );
+        prop_assert_eq!(
+            result == RuleResult::Pass,
+            shape.has_enforcing_aggregator(),
+            "{}\n{:?}",
+            yaml,
+            result
+        );
+    }
+}
+
+#[test]
+fn this_repositorys_ci_passes_wf004_and_reports_the_aggregator() {
+    // The real-world shape WF004 was written for must not be a false failure.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/.github/workflows/ci.yml");
+    let raw = std::fs::read_to_string(path).unwrap();
+    let mut facts = base_facts();
+    facts.workflows = vec![workflow_from_raw(".github/workflows/ci.yml", &raw)];
+
+    assert_eq!(
+        evaluate(
+            &RuleKind::Workflow(WorkflowCheck::WorkflowHasRequiredChecksComplete),
+            &facts
+        ),
+        RuleResult::Pass
+    );
+    assert!(every_default_branch_pull_request_reports_check(
+        &facts,
+        "all-required-checks-complete"
+    ));
+}
+
+#[test]
 fn no_workflow_run_trigger_passes_when_absent() {
     let mut facts = base_facts();
     facts.workflows = vec![workflow_with_single_job(
@@ -1695,6 +1848,8 @@ fn no_workflow_run_trigger_fails_irrespective_of_jobs_or_checkout() {
                     tags: Vec::new(),
                     tags_ignore: Vec::new(),
                     paths: Vec::new(),
+                    paths_ignore: Vec::new(),
+                    types: Vec::new(),
                 }),
                 pull_request: None,
                 pull_request_target: None,
@@ -2594,21 +2749,27 @@ proptest! {
     }
 }
 
+/// A CI workflow, run on pushes to and pull requests into `main`, whose only
+/// job is an `all-required-checks-complete` aggregator with this condition
+/// and these steps.
 fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> WorkflowFile {
+    let main_only = TriggerFilter {
+        branches: vec!["main".to_owned()],
+        branches_ignore: Vec::new(),
+        tags: Vec::new(),
+        tags_ignore: Vec::new(),
+        paths: Vec::new(),
+        paths_ignore: Vec::new(),
+        types: Vec::new(),
+    };
     WorkflowFile {
         path: ".github/workflows/ci.yml".to_owned(),
         raw_yaml: None,
         workflow: Workflow {
             name: Some("CI".to_owned()),
             triggers: Triggers {
-                push: Some(TriggerFilter {
-                    branches: vec!["main".to_owned()],
-                    branches_ignore: Vec::new(),
-                    tags: Vec::new(),
-                    tags_ignore: Vec::new(),
-                    paths: Vec::new(),
-                }),
-                pull_request: None,
+                push: Some(main_only.clone()),
+                pull_request: Some(main_only),
                 pull_request_target: None,
                 workflow_run: None,
                 workflow_dispatch: None,
@@ -2616,8 +2777,10 @@ fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> Workfl
             jobs: BTreeMap::from([(
                 "all-required-checks-complete".to_owned(),
                 Job {
+                    name: None,
                     needs: Vec::new(),
                     condition: condition.map(str::to_owned),
+                    strategy: None,
                     kind: JobKind::Standard(StandardJob {
                         runs_on: None,
                         steps,
@@ -2628,11 +2791,23 @@ fn required_checks_workflow(condition: Option<&str>, steps: Vec<Step>) -> Workfl
     }
 }
 
+/// The gate action, handed the full `needs` context.
 fn check_required_lite_step() -> Step {
-    action_step(ActionReference::Other(
-        "G-Research/common-actions/check-required-lite@2b7dc49cb14f3344fbe6019c14a31165e258c059"
-            .to_owned(),
-    ))
+    Step {
+        name: None,
+        id: None,
+        condition: None,
+        kind: StepKind::Action(ActionStep {
+            uses: ActionReference::Other(
+                "G-Research/common-actions/check-required-lite@2b7dc49cb14f3344fbe6019c14a31165e258c059"
+                    .to_owned(),
+            ),
+            with: BTreeMap::from([(
+                "needs-context".to_owned(),
+                WithValue::String("${{ toJSON(needs) }}".to_owned()),
+            )]),
+        }),
+    }
 }
 
 #[test]
@@ -2778,29 +2953,8 @@ fn workflow_has_required_checks_complete_passes_when_one_of_many_jobs_matches() 
     facts.workflows = vec![
         required_checks_workflow(Some("${{ success() }}"), vec![check_required_lite_step()]),
         WorkflowFile {
-            path: ".github/workflows/release.yml".to_owned(),
-            raw_yaml: None,
-            workflow: Workflow {
-                name: Some("Release".to_owned()),
-                triggers: Triggers {
-                    push: None,
-                    pull_request: None,
-                    pull_request_target: None,
-                    workflow_run: None,
-                    workflow_dispatch: None,
-                },
-                jobs: BTreeMap::from([(
-                    "all-required-checks-complete".to_owned(),
-                    Job {
-                        needs: Vec::new(),
-                        condition: Some("${{ always() }}".to_owned()),
-                        kind: JobKind::Standard(StandardJob {
-                            runs_on: None,
-                            steps: vec![check_required_lite_step()],
-                        }),
-                    },
-                )]),
-            },
+            path: ".github/workflows/gate.yml".to_owned(),
+            ..required_checks_workflow(Some("${{ always() }}"), vec![check_required_lite_step()])
         },
     ];
 

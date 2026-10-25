@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 51686c7580443c6953cb7d8df609ba860c816c07584ef72ffa0d6ab8849dcef1 # shrinks to shape = CiShape { pull_request: Filtered(PullRequestFilter { branches: Absent, paths: false, paths_ignore: true, types: None }), other_jobs: [], gate_key: "all-required-checks-complete", gate_name: Absent, gate_matrix: false, gate_needs: [], gate_condition: Absent, gate_step: Absent }, ruleset_exists = false
+cc 885e9a0eacf00886914d3cde110c14bef6069188d8bd27c425d23a967e63def9 # shrinks to shape = CiShape { pull_request: Filtered(PullRequestFilter { branches: Absent, paths: false, paths_ignore: false, types: Some(["closed"]) }), other_jobs: [], gate_key: "all-required-checks-complete", gate_name: Absent, gate_matrix: false, gate_needs: [], gate_condition: Absent, gate_step: Absent }, ruleset_exists = false

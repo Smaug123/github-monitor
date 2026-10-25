@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::facts::{RepoFacts, WorkflowFile};
 use crate::workflow::expressions::{expression_blocks, references_secret, secret_tokens};
-use crate::workflow::model::{ActionReference, Job, Step, Workflow};
+use crate::workflow::model::{ActionReference, Job, Step, WithValue, Workflow};
 
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ pub(super) fn evaluate(rule: &WorkflowCheck, facts: &RepoFacts) -> RuleResult {
                                 .into_iter()
                                 .chain(job.steps().iter().filter_map(|step| step.uses()))
                         })
-                        .filter(|uses| !action_reference_is_pinned_to_sha(uses))
+                        .filter(|uses| !action_reference_is_pinned(uses))
                         .map(|uses| {
                             format!(
                                 "{} uses {}",
@@ -84,7 +84,8 @@ pub(super) fn evaluate(rule: &WorkflowCheck, facts: &RepoFacts) -> RuleResult {
             } else {
                 RuleResult::Fail {
                     reason: format!(
-                        "workflow actions must be pinned to 40-character commit SHAs: {}",
+                        "workflow actions must be pinned to 40-character commit SHAs \
+                         (`docker://` images to sha256 digests): {}",
                         summarize_examples(&offenders)
                     ),
                 }
@@ -263,16 +264,78 @@ fn workflow_has_pr_trigger(workflow: &Workflow) -> bool {
     workflow.triggers.pull_request.is_some() || workflow.triggers.pull_request_target.is_some()
 }
 
+/// GitHub's default activity types for `pull_request`. A workflow restricted to
+/// fewer may skip a head commit (e.g. without `synchronize`, a push to the pull
+/// request runs nothing), leaving that commit without the check.
+const DEFAULT_PULL_REQUEST_TYPES: [&str; 3] = ["opened", "synchronize", "reopened"];
+
+/// Whether `workflow` runs on the head commit of every pull request into
+/// `branch`. That needs a `pull_request` trigger: `pull_request_target` runs on
+/// the base branch and reports nothing on the head commit. Its branch filter
+/// must admit `branch`, it must keep every default activity type, and it must
+/// have no path filter, because GitHub leaves a required check from a
+/// path-skipped workflow pending forever.
+fn runs_on_every_pull_request_into(workflow: &Workflow, branch: &str) -> bool {
+    workflow
+        .triggers
+        .pull_request
+        .as_ref()
+        .is_some_and(|filter| {
+            filter.paths.is_empty()
+                && filter.paths_ignore.is_empty()
+                && branch_matches_filters(&filter.branches, branch)
+                && !filter
+                    .branches_ignore
+                    .iter()
+                    .any(|pattern| branch_pattern_matches(pattern, branch))
+                && (filter.types.is_empty()
+                    || DEFAULT_PULL_REQUEST_TYPES
+                        .iter()
+                        .all(|required| filter.types.iter().any(|kind| kind == required)))
+        })
+}
+
+/// Whether some workflow reports a status check named `check_name` on the head
+/// commit of every pull request into the default branch. Requiring a check for
+/// which this is false blocks every merge: GitHub waits for it forever.
+pub(crate) fn every_default_branch_pull_request_reports_check(
+    facts: &RepoFacts,
+    check_name: &str,
+) -> bool {
+    let default_branch = facts.default_branch.to_string();
+    facts.workflows.iter().any(|workflow_file| {
+        runs_on_every_pull_request_into(&workflow_file.workflow, &default_branch)
+            && workflow_file
+                .workflow
+                .jobs
+                .iter()
+                .any(|(key, job)| job.status_check_name(key) == Some(check_name))
+    })
+}
+
 fn evaluate_required_checks_complete(facts: &RepoFacts) -> RuleResult {
+    let default_branch = facts.default_branch.to_string();
+    let default_branch = default_branch.as_str();
+    // A job is a candidate if either its key or its display name is the
+    // aggregator's, so a misnamed aggregator is diagnosed rather than ignored.
     let candidates = facts
         .workflows
         .iter()
-        .filter_map(|workflow_file| {
+        .flat_map(|workflow_file| {
             workflow_file
                 .workflow
                 .jobs
-                .get(REQUIRED_CHECKS_JOB_NAME)
-                .map(|job| (workflow_file.path.as_str(), job))
+                .iter()
+                .filter(|(key, job)| {
+                    key.as_str() == REQUIRED_CHECKS_JOB_NAME
+                        || job.name.as_deref() == Some(REQUIRED_CHECKS_JOB_NAME)
+                })
+                .map(move |(key, job)| {
+                    (
+                        workflow_file.path.as_str(),
+                        aggregator_job_problems(&workflow_file.workflow, key, job, default_branch),
+                    )
+                })
         })
         .collect::<Vec<_>>();
 
@@ -282,16 +345,13 @@ fn evaluate_required_checks_complete(facts: &RepoFacts) -> RuleResult {
         };
     }
 
-    if candidates
-        .iter()
-        .any(|(_, job)| required_checks_job_is_valid(job))
-    {
+    if candidates.iter().any(|(_, problems)| problems.is_empty()) {
         return RuleResult::Pass;
     }
 
     let details = candidates
         .iter()
-        .map(|(path, job)| format!("{path}: {}", describe_job_issues(job)))
+        .map(|(path, problems)| format!("{path}: {}", problems.join("; ")))
         .collect::<Vec<_>>()
         .join("; ");
 
@@ -300,33 +360,93 @@ fn evaluate_required_checks_complete(facts: &RepoFacts) -> RuleResult {
     }
 }
 
-fn required_checks_job_is_valid(job: &Job) -> bool {
-    condition_is_always(job.condition.as_deref())
-        && job
-            .steps()
-            .iter()
-            .any(|step| step_uses_action(step, REQUIRED_CHECKS_ACTION))
-}
+/// Everything that stops job `key` from being an aggregator that enforces: its
+/// check must be reported on every pull request under the name the ruleset
+/// requires, it must run even when other jobs fail, it must need every other
+/// job in its workflow, and it must hand the gate action the full `needs`
+/// context, from which the action decides the check's result. Empty means the
+/// job enforces.
+fn aggregator_job_problems(
+    workflow: &Workflow,
+    key: &str,
+    job: &Job,
+    default_branch: &str,
+) -> Vec<String> {
+    let mut problems = Vec::new();
 
-fn describe_job_issues(job: &Job) -> String {
-    let mut issues = Vec::new();
+    match job.status_check_name(key) {
+        Some(REQUIRED_CHECKS_JOB_NAME) => {}
+        Some(name) => problems.push(format!(
+            "job `{key}` reports its status check as `{name}`, not `{REQUIRED_CHECKS_JOB_NAME}`"
+        )),
+        None => problems.push(format!(
+            "job `{key}` has no fixed status-check name (it has a matrix, an expression in \
+             `name:`, or calls a reusable workflow)"
+        )),
+    }
+
+    if !runs_on_every_pull_request_into(workflow, default_branch) {
+        problems.push(format!(
+            "the workflow does not run on every pull request into `{default_branch}` (it needs a \
+             `pull_request` trigger with no path filter, a branch filter admitting \
+             `{default_branch}`, and every default activity type)"
+        ));
+    }
 
     if !condition_is_always(job.condition.as_deref()) {
         let actual = job.condition.as_deref().unwrap_or("<missing>");
-        issues.push(format!(
+        problems.push(format!(
             "if-condition is `{actual}` but must be `${{{{ always() }}}}`"
         ));
     }
 
-    if !job
+    match job
         .steps()
         .iter()
-        .any(|step| step_uses_action(step, REQUIRED_CHECKS_ACTION))
+        .find(|step| step_uses_action(step, REQUIRED_CHECKS_ACTION))
     {
-        issues.push(format!("no step uses `{REQUIRED_CHECKS_ACTION}`"));
+        None => problems.push(format!("no step uses `{REQUIRED_CHECKS_ACTION}`")),
+        Some(step) if !passes_full_needs_context(step) => problems.push(format!(
+            "the `{REQUIRED_CHECKS_ACTION}` step must set `needs-context: ${{{{ toJSON(needs) }}}}`"
+        )),
+        Some(_) => {}
     }
 
-    issues.join("; ")
+    let needed = job
+        .needs
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let unneeded = workflow
+        .jobs
+        .keys()
+        .map(String::as_str)
+        .filter(|other| *other != key && !needed.contains(other))
+        .map(|other| format!("`{other}`"))
+        .collect::<Vec<_>>();
+    if !unneeded.is_empty() {
+        problems.push(format!(
+            "`needs` omits {}, so their failures do not fail the check",
+            unneeded.join(", ")
+        ));
+    }
+
+    problems
+}
+
+/// Whether the step's `needs-context` input is `${{ toJSON(needs) }}`, up to
+/// whitespace and case (expression function and context names are
+/// case-insensitive).
+fn passes_full_needs_context(step: &Step) -> bool {
+    let Some(WithValue::String(value)) = step.input("needs-context") else {
+        return false;
+    };
+    let normalized: String = value
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    normalized == "${{tojson(needs)}}"
 }
 
 fn condition_is_always(condition: Option<&str>) -> bool {
@@ -395,12 +515,18 @@ fn action_reference_matches(raw: &str, action: &str) -> bool {
     }
 }
 
-fn action_reference_is_pinned_to_sha(uses: &ActionReference) -> bool {
+/// Whether `uses` names an immutable revision: a full commit SHA for an action
+/// or reusable workflow in another repository, or a sha256 content digest for a
+/// `docker://` image (a tag can be re-pointed at any time). A local `./` action
+/// is fixed by this repository's own commit.
+pub(crate) fn action_reference_is_pinned(uses: &ActionReference) -> bool {
     match uses {
         ActionReference::Repository(action_ref) => is_commit_sha(&action_ref.version),
         ActionReference::Other(raw) => {
-            if raw.starts_with("./") || raw.starts_with("docker://") {
+            if raw.starts_with("./") {
                 true
+            } else if let Some(image) = raw.strip_prefix("docker://") {
+                docker_image_is_pinned_by_digest(image)
             } else if let Some((_, version)) = raw.split_once('@') {
                 is_commit_sha(version)
             } else {
@@ -410,6 +536,19 @@ fn action_reference_is_pinned_to_sha(uses: &ActionReference) -> bool {
     }
 }
 
+/// `image[:tag]@sha256:<64 lowercase hex>`; OCI digests are lowercase.
+fn docker_image_is_pinned_by_digest(image: &str) -> bool {
+    image.split_once('@').is_some_and(|(name, digest)| {
+        !name.is_empty()
+            && digest.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+    })
+}
+
 fn action_reference_text(uses: &ActionReference) -> String {
     match uses {
         ActionReference::Repository(action_ref) => action_ref.to_string(),
@@ -417,7 +556,7 @@ fn action_reference_text(uses: &ActionReference) -> String {
     }
 }
 
-pub(super) fn is_commit_sha(version: &str) -> bool {
+pub(crate) fn is_commit_sha(version: &str) -> bool {
     version.len() == 40 && version.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

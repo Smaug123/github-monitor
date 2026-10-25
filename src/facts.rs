@@ -740,16 +740,22 @@ mod tests {
             proptest::collection::vec(identifier(), 0..3),
             proptest::collection::vec(identifier(), 0..3),
             proptest::collection::vec(identifier(), 0..3),
+            proptest::collection::vec(identifier(), 0..3),
+            proptest::collection::vec(identifier(), 0..3),
         )
-            .prop_map(|(branches, branches_ignore, tags, tags_ignore, paths)| {
-                TriggerFilter {
-                    branches,
-                    branches_ignore,
-                    tags,
-                    tags_ignore,
-                    paths,
-                }
-            })
+            .prop_map(
+                |(branches, branches_ignore, tags, tags_ignore, paths, paths_ignore, types)| {
+                    TriggerFilter {
+                        branches,
+                        branches_ignore,
+                        tags,
+                        tags_ignore,
+                        paths,
+                        paths_ignore,
+                        types,
+                    }
+                },
+            )
     }
 
     fn with_value_strategy() -> impl Strategy<Value = WithValue> {
@@ -757,6 +763,8 @@ mod tests {
             text().prop_map(WithValue::String),
             any::<bool>().prop_map(WithValue::Bool),
             any::<i32>().prop_map(|value| WithValue::Integer(i64::from(value))),
+            (-1.0e6_f64..1.0e6).prop_map(WithValue::Float),
+            Just(WithValue::Null),
         ]
     }
 
@@ -810,10 +818,14 @@ mod tests {
                     proptest::collection::vec(step_strategy(), 0..4),
                     proptest::collection::vec(identifier(), 0..3),
                     proptest::option::of(text()),
+                    proptest::option::of(text()),
+                    proptest::option::of(proptest::collection::vec(identifier(), 1..3)),
                 )
-                    .prop_map(|(steps, needs, condition)| Job {
+                    .prop_map(|(steps, needs, condition, name, matrix_os)| Job {
+                        name,
                         needs,
                         condition,
+                        strategy: matrix_os.map(|os| serde_json::json!({ "matrix": { "os": os } })),
                         kind: JobKind::Standard(StandardJob {
                             runs_on: None,
                             steps,
@@ -902,8 +914,10 @@ mod tests {
         jobs.insert(
             "build".to_owned(),
             Job {
+                name: None,
                 needs: Vec::new(),
                 condition: None,
+                strategy: None,
                 kind: JobKind::Standard(StandardJob {
                     runs_on: None,
                     steps: vec![
@@ -986,6 +1000,8 @@ mod tests {
                             tags: Vec::new(),
                             tags_ignore: Vec::new(),
                             paths: Vec::new(),
+                            paths_ignore: Vec::new(),
+                            types: Vec::new(),
                         }),
                         pull_request: Some(TriggerFilter {
                             branches: vec!["main".to_owned()],
@@ -993,6 +1009,8 @@ mod tests {
                             tags: Vec::new(),
                             tags_ignore: Vec::new(),
                             paths: Vec::new(),
+                            paths_ignore: Vec::new(),
+                            types: Vec::new(),
                         }),
                         pull_request_target: None,
                         workflow_run: None,

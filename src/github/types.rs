@@ -636,6 +636,7 @@ string_enum!(RulesetRuleType {
     PullRequest => "pull_request",
     RequiredStatusChecks => "required_status_checks",
     NonFastForward => "non_fast_forward",
+    MergeQueue => "merge_queue",
 });
 
 string_enum!(RepositoryContentType {

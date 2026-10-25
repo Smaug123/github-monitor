@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4920ac34f865a168204d848adc206f6ded10d921a8b81d53462559e07b9f6612 # shrinks to document = Mapping {"on": String("push"), "jobs": Mapping {"a": Mapping {"runs-on": String("ubuntu-latest"), "steps": Sequence [Mapping {"uses": String("a/a@v0"), "with": Mapping {"a": Number(0.0)}}]}}}
