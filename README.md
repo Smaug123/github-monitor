@@ -253,9 +253,9 @@ The default rule set is currently fixed in code.
 | `RS006` | Active branch rulesets prevent force pushes |
 | `RS007` | The repo uses rulesets instead of legacy branch protection |
 | `WF001` | At least one workflow runs on pushes to the default branch |
-| `WF002` | GitHub Actions and reusable workflow references are pinned to 40-character commit SHAs |
+| `WF002` | GitHub Actions and reusable workflow references are pinned to 40-character commit SHAs, and `docker://` actions to sha256 digests |
 | `WF003` | `pull_request_target` workflows do not use `actions/checkout` |
-| `WF004` | A workflow defines an `all-required-checks-complete` aggregator job |
+| `WF004` | An `all-required-checks-complete` aggregator job reports on every pull request into the default branch, runs `if: always()`, needs every other job in its workflow, and passes `needs-context: ${{ toJSON(needs) }}` to `check-required-lite` |
 | `WF005` | No workflow uses the `workflow_run` trigger |
 | `WF006` | PR-triggered workflows do not access secrets (`secrets.*`, `toJSON(secrets)`, `secrets: inherit`) |
 | `NX001` | `flake.nix` exists |

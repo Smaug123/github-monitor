@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::types::{Owner, RepoName};
@@ -144,6 +144,21 @@ pub struct TriggerFilter {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub paths: Vec<String>,
+    #[serde(
+        default,
+        rename = "paths-ignore",
+        deserialize_with = "deserialize_string_or_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub paths_ignore: Vec<String>,
+    /// Activity types the event is restricted to; empty means GitHub's
+    /// defaults (for `pull_request`: `opened`, `synchronize`, `reopened`).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string_or_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub types: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -152,25 +167,98 @@ pub struct WorkflowDispatch {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkflowRun {}
 
+/// A job. Whether it is a reusable-workflow call is decided by the presence of
+/// a `uses:` key (see [`RawJob`]), never by which shape happens to parse: an
+/// untagged fallback once turned a call with a float input into an empty
+/// standard job, hiding its `uses:` from every rule.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(try_from = "RawJob")]
 pub struct Job {
-    #[serde(
-        default,
-        deserialize_with = "deserialize_string_or_vec",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    /// The display name, which is also the name of the job's status check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    /// The `strategy` block, kept opaque: rules only ask whether it has a
+    /// matrix (which changes the job's status-check names).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<serde_json::Value>,
     #[serde(flatten)]
     pub kind: JobKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum JobKind {
     Reusable(ReusableJob),
     Standard(StandardJob),
+}
+
+/// Every job key the model reads, before the reusable/standard split.
+#[derive(Deserialize)]
+struct RawJob {
+    #[serde(default, deserialize_with = "deserialize_optional_scalar_text")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    needs: Vec<String>,
+    #[serde(
+        default,
+        rename = "if",
+        deserialize_with = "deserialize_optional_scalar_text"
+    )]
+    condition: Option<String>,
+    #[serde(default)]
+    strategy: Option<serde_json::Value>,
+    #[serde(default)]
+    uses: Option<ActionReference>,
+    #[serde(default)]
+    with: BTreeMap<String, WithValue>,
+    #[serde(default, rename = "runs-on")]
+    runs_on: Option<RunsOn>,
+    #[serde(default)]
+    steps: Vec<Step>,
+}
+
+impl TryFrom<RawJob> for Job {
+    type Error = String;
+
+    fn try_from(raw: RawJob) -> Result<Self, Self::Error> {
+        let kind = match raw.uses {
+            Some(uses) => {
+                if raw.runs_on.is_some() || !raw.steps.is_empty() {
+                    return Err(
+                        "a job that calls a reusable workflow (`uses:`) cannot also have \
+                         `runs-on:` or `steps:`"
+                            .to_owned(),
+                    );
+                }
+                JobKind::Reusable(ReusableJob {
+                    uses,
+                    with: raw.with,
+                })
+            }
+            None => {
+                if !raw.with.is_empty() {
+                    return Err(
+                        "`with:` is only valid on a job that calls a reusable workflow".to_owned(),
+                    );
+                }
+                JobKind::Standard(StandardJob {
+                    runs_on: raw.runs_on,
+                    steps: raw.steps,
+                })
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            needs: raw.needs,
+            condition: raw.condition,
+            strategy: raw.strategy,
+            kind,
+        })
+    }
 }
 
 impl Default for JobKind {
@@ -209,6 +297,33 @@ impl Job {
         }
     }
 
+    /// The name of the single status check this job reports, given its key in
+    /// `jobs:`, or `None` when that name is not a fixed string. A matrix
+    /// appends its values to the name (one check per combination), an
+    /// expression in `name:` is evaluated per run, and a reusable-workflow
+    /// call reports `caller / callee` checks for the callee's jobs.
+    pub fn status_check_name<'a>(&'a self, key: &'a str) -> Option<&'a str> {
+        if self.has_matrix() || matches!(self.kind, JobKind::Reusable(_)) {
+            return None;
+        }
+        match &self.name {
+            None => Some(key),
+            Some(name) if name.contains("${{") => None,
+            Some(name) => Some(name),
+        }
+    }
+
+    /// Whether the job's `strategy` defines a matrix. A `strategy` of a shape
+    /// the model does not recognise counts as having one, since the caller
+    /// then cannot know the job's check names.
+    fn has_matrix(&self) -> bool {
+        match &self.strategy {
+            None => false,
+            Some(serde_json::Value::Object(strategy)) => strategy.contains_key("matrix"),
+            Some(_) => true,
+        }
+    }
+
     #[cfg(test)]
     pub fn runs_on(&self) -> Option<&RunsOn> {
         match &self.kind {
@@ -238,7 +353,11 @@ pub struct RunsOnGroup {
     pub labels: Vec<String>,
 }
 
+/// A step. Whether it runs an action or a script is decided by which of
+/// `uses:`/`run:` is present (see [`RawStep`]), never by which shape happens to
+/// parse.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawStep")]
 pub struct Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -248,6 +367,53 @@ pub struct Step {
     pub condition: Option<String>,
     #[serde(flatten)]
     pub kind: StepKind,
+}
+
+/// Every step key the model reads, before the action/script split.
+#[derive(Deserialize)]
+struct RawStep {
+    #[serde(default, deserialize_with = "deserialize_optional_scalar_text")]
+    name: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(
+        default,
+        rename = "if",
+        deserialize_with = "deserialize_optional_scalar_text"
+    )]
+    condition: Option<String>,
+    #[serde(default)]
+    uses: Option<ActionReference>,
+    #[serde(default)]
+    with: BTreeMap<String, WithValue>,
+    #[serde(default)]
+    run: Option<String>,
+}
+
+impl TryFrom<RawStep> for Step {
+    type Error = String;
+
+    fn try_from(raw: RawStep) -> Result<Self, Self::Error> {
+        let kind = match (raw.uses, raw.run) {
+            (Some(uses), None) => StepKind::Action(ActionStep {
+                uses,
+                with: raw.with,
+            }),
+            (None, Some(run)) if raw.with.is_empty() => StepKind::Run(RunStep { run }),
+            (None, Some(_)) => {
+                return Err("`with:` is only valid on a step that `uses:` an action".to_owned());
+            }
+            (Some(_), Some(_)) | (None, None) => {
+                return Err("a step must have exactly one of `uses:` or `run:`".to_owned());
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            id: raw.id,
+            condition: raw.condition,
+            kind,
+        })
+    }
 }
 
 impl Step {
@@ -272,9 +438,18 @@ impl Step {
             StepKind::Run(_) => None,
         }
     }
+
+    /// The `with:` input `name` of an action step; `None` for a `run:` step or
+    /// an input it does not set.
+    pub fn input(&self, name: &str) -> Option<&WithValue> {
+        match &self.kind {
+            StepKind::Action(action) => action.with.get(name),
+            StepKind::Run(_) => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum StepKind {
     Action(ActionStep),
@@ -398,12 +573,100 @@ impl fmt::Display for ParseActionRefError {
 
 impl std::error::Error for ParseActionRefError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A `with:` input. GitHub hands every input to the action as a string, but
+/// the YAML may spell it as any scalar (`python-version: 3.12`, `ref:` with no
+/// value), and all of those must parse.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum WithValue {
     String(String),
     Bool(bool),
     Integer(i64),
+    Float(f64),
+    Null,
+}
+
+impl WithValue {
+    /// The scalar's text, as GitHub reads it where it expects a string; `None`
+    /// for `Null`.
+    fn into_text(self) -> Option<String> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Bool(value) => Some(value.to_string()),
+            Self::Integer(value) => Some(value.to_string()),
+            Self::Float(value) => Some(value.to_string()),
+            Self::Null => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WithValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ScalarVisitor;
+
+        impl<'de> Visitor<'de> for ScalarVisitor {
+            type Value = WithValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a scalar (string, boolean, number, or null)")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(WithValue::String(value.to_owned()))
+            }
+
+            fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(WithValue::String(value))
+            }
+
+            fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(WithValue::Bool(value))
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(WithValue::Integer(value))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                i64::try_from(value).map(WithValue::Integer).map_err(|_| {
+                    E::invalid_value(de::Unexpected::Unsigned(value), &"an integer within i64")
+                })
+            }
+
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(WithValue::Float(value))
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(WithValue::Null)
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(WithValue::Null)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                WithValue::deserialize(deserializer)
+            }
+        }
+
+        deserializer.deserialize_any(ScalarVisitor)
+    }
+}
+
+/// An optional scalar, as text. GitHub reads `if:` as an expression and
+/// `name:` as text, so `if: false` and `name: 2` mean `"false"` and `"2"`.
+fn deserialize_optional_scalar_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<WithValue>::deserialize(deserializer)?.and_then(WithValue::into_text))
 }
 
 fn parse_optional_default<T>(
@@ -455,6 +718,8 @@ where
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
 
@@ -477,16 +742,22 @@ mod tests {
             proptest::collection::vec(path_fragment(), 0..3),
             proptest::collection::vec(path_fragment(), 0..3),
             proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(path_fragment(), 0..3),
+            proptest::collection::vec(identifier(), 0..3),
         )
-            .prop_map(|(branches, branches_ignore, tags, tags_ignore, paths)| {
-                TriggerFilter {
-                    branches,
-                    branches_ignore,
-                    tags,
-                    tags_ignore,
-                    paths,
-                }
-            })
+            .prop_map(
+                |(branches, branches_ignore, tags, tags_ignore, paths, paths_ignore, types)| {
+                    TriggerFilter {
+                        branches,
+                        branches_ignore,
+                        tags,
+                        tags_ignore,
+                        paths,
+                        paths_ignore,
+                        types,
+                    }
+                },
+            )
     }
 
     fn triggers_strategy() -> impl Strategy<Value = Triggers> {
@@ -539,6 +810,16 @@ mod tests {
             path_fragment().prop_map(WithValue::String),
             any::<bool>().prop_map(WithValue::Bool),
             any::<i32>().prop_map(|value| WithValue::Integer(i64::from(value))),
+            (-1.0e6_f64..1.0e6).prop_map(WithValue::Float),
+            Just(WithValue::Null),
+        ]
+    }
+
+    fn job_strategy_block() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            proptest::collection::vec(identifier(), 1..3)
+                .prop_map(|os| serde_json::json!({ "matrix": { "os": os } })),
+            any::<bool>().prop_map(|fail_fast| serde_json::json!({ "fail-fast": fail_fast })),
         ]
     }
 
@@ -575,30 +856,30 @@ mod tests {
 
     fn job_strategy() -> impl Strategy<Value = Job> {
         let standard = (
-            proptest::collection::vec(identifier(), 0..3),
-            proptest::option::of(path_fragment()),
             proptest::option::of(runs_on_strategy()),
             proptest::collection::vec(step_strategy(), 0..4),
         )
-            .prop_map(|(needs, condition, runs_on, steps)| Job {
-                needs,
-                condition,
-                kind: JobKind::Standard(StandardJob { runs_on, steps }),
-            });
-
+            .prop_map(|(runs_on, steps)| JobKind::Standard(StandardJob { runs_on, steps }));
         let reusable = (
-            proptest::collection::vec(identifier(), 0..3),
-            proptest::option::of(path_fragment()),
             action_reference_strategy(),
             proptest::collection::btree_map(identifier(), with_value_strategy(), 0..3),
         )
-            .prop_map(|(needs, condition, uses, with)| Job {
+            .prop_map(|(uses, with)| JobKind::Reusable(ReusableJob { uses, with }));
+
+        (
+            proptest::option::of(path_fragment()),
+            proptest::collection::vec(identifier(), 0..3),
+            proptest::option::of(path_fragment()),
+            proptest::option::of(job_strategy_block()),
+            prop_oneof![standard, reusable],
+        )
+            .prop_map(|(name, needs, condition, strategy, kind)| Job {
+                name,
                 needs,
                 condition,
-                kind: JobKind::Reusable(ReusableJob { uses, with }),
-            });
-
-        prop_oneof![standard, reusable]
+                strategy,
+                kind,
+            })
     }
 
     fn workflow_strategy() -> impl Strategy<Value = Workflow> {
@@ -717,6 +998,8 @@ jobs:
                 tags: Vec::new(),
                 tags_ignore: Vec::new(),
                 paths: vec!["app".to_owned()],
+                paths_ignore: Vec::new(),
+                types: Vec::new(),
             })
         );
         assert_eq!(
@@ -899,6 +1182,8 @@ jobs:
                 tags: Vec::new(),
                 tags_ignore: Vec::new(),
                 paths: Vec::new(),
+                paths_ignore: Vec::new(),
+                types: Vec::new(),
             })
         );
     }
@@ -930,6 +1215,8 @@ jobs:
                 tags: vec!["v*".to_owned()],
                 tags_ignore: vec!["v0.*".to_owned()],
                 paths: Vec::new(),
+                paths_ignore: Vec::new(),
+                types: Vec::new(),
             })
         );
     }
@@ -969,6 +1256,8 @@ jobs:
                 tags: Vec::new(),
                 tags_ignore: Vec::new(),
                 paths: Vec::new(),
+                paths_ignore: Vec::new(),
+                types: Vec::new(),
             })
         );
         let build = workflow.jobs.get("build").unwrap();
@@ -987,6 +1276,244 @@ jobs:
             step.with().unwrap().get("fetch-depth"),
             Some(&WithValue::Integer(1))
         );
+    }
+
+    /// Any YAML scalar: GitHub coerces each of these to a string when it is an
+    /// action input, and accepts a bool or number where it expects an
+    /// expression (`if:`) or a display name (`name:`).
+    fn yaml_scalar() -> impl Strategy<Value = serde_yml::Value> {
+        prop_oneof![
+            "[a-z0-9 ._-]{0,12}".prop_map(serde_yml::Value::from),
+            any::<bool>().prop_map(serde_yml::Value::from),
+            any::<i64>().prop_map(serde_yml::Value::from),
+            (-1.0e9_f64..1.0e9).prop_map(serde_yml::Value::from),
+            Just(serde_yml::Value::Null),
+        ]
+    }
+
+    fn yaml_mapping<K: Into<serde_yml::Value>>(
+        entries: impl IntoIterator<Item = (K, serde_yml::Value)>,
+    ) -> serde_yml::Value {
+        let mut mapping = serde_yml::Mapping::new();
+        for (key, value) in entries {
+            mapping.insert(key.into(), value);
+        }
+        serde_yml::Value::Mapping(mapping)
+    }
+
+    fn with_inputs() -> impl Strategy<Value = Option<serde_yml::Value>> {
+        proptest::collection::btree_map("[a-z][a-z0-9-]{0,8}", yaml_scalar(), 0..4)
+            .prop_map(|inputs| (!inputs.is_empty()).then(|| yaml_mapping(inputs)))
+    }
+
+    fn if_condition() -> impl Strategy<Value = Option<serde_yml::Value>> {
+        proptest::option::of(prop_oneof![
+            any::<bool>().prop_map(serde_yml::Value::from),
+            Just(serde_yml::Value::from("${{ always() }}")),
+            Just(serde_yml::Value::from("github.event_name == 'push'")),
+        ])
+    }
+
+    fn display_name() -> impl Strategy<Value = Option<serde_yml::Value>> {
+        proptest::option::of(prop_oneof![
+            "[A-Za-z][A-Za-z0-9 ]{0,12}".prop_map(serde_yml::Value::from),
+            any::<i64>().prop_map(serde_yml::Value::from),
+            (-1.0e3_f64..1.0e3).prop_map(serde_yml::Value::from),
+        ])
+    }
+
+    fn step_uses() -> impl Strategy<Value = String> {
+        prop_oneof![
+            (
+                "[a-z]{1,8}",
+                "[a-z]{1,8}",
+                prop_oneof!["v[0-9]", "[0-9a-f]{40}", Just("main".to_owned())],
+            )
+                .prop_map(|(owner, repo, version)| format!("{owner}/{repo}@{version}")),
+            ("[a-z]{1,8}", "[a-z]{1,8}").prop_map(|(owner, repo)| format!("{owner}/{repo}/sub@v1")),
+            Just("docker://alpine:3".to_owned()),
+            Just("./.github/actions/local".to_owned()),
+        ]
+    }
+
+    fn reusable_uses() -> impl Strategy<Value = String> {
+        (
+            "[a-z]{1,8}",
+            "[a-z]{1,8}",
+            prop_oneof![Just("main"), Just("v1")],
+        )
+            .prop_map(|(owner, repo, version)| {
+                format!("{owner}/{repo}/.github/workflows/build.yml@{version}")
+            })
+    }
+
+    /// Appends the optional keys, skipping absent ones (a present `null` is a
+    /// different document from an absent key).
+    fn with_optional_keys(
+        mut entries: Vec<(&'static str, serde_yml::Value)>,
+        optional: Vec<(&'static str, Option<serde_yml::Value>)>,
+    ) -> serde_yml::Value {
+        entries.extend(
+            optional
+                .into_iter()
+                .filter_map(|(key, value)| value.map(|value| (key, value))),
+        );
+        yaml_mapping(entries)
+    }
+
+    fn step_document() -> impl Strategy<Value = serde_yml::Value> {
+        let action = (step_uses(), with_inputs(), if_condition(), display_name()).prop_map(
+            |(uses, with, condition, name)| {
+                with_optional_keys(
+                    vec![("uses", serde_yml::Value::from(uses))],
+                    vec![("with", with), ("if", condition), ("name", name)],
+                )
+            },
+        );
+        let run = (".{1,20}", if_condition(), display_name()).prop_map(|(run, condition, name)| {
+            with_optional_keys(
+                vec![("run", serde_yml::Value::from(run))],
+                vec![("if", condition), ("name", name)],
+            )
+        });
+        prop_oneof![action, run]
+    }
+
+    fn job_document() -> impl Strategy<Value = serde_yml::Value> {
+        let standard = (
+            proptest::collection::vec(step_document(), 1..4),
+            if_condition(),
+            display_name(),
+        )
+            .prop_map(|(steps, condition, name)| {
+                with_optional_keys(
+                    vec![
+                        ("runs-on", serde_yml::Value::from("ubuntu-latest")),
+                        ("steps", serde_yml::Value::Sequence(steps)),
+                    ],
+                    vec![("if", condition), ("name", name)],
+                )
+            });
+        let reusable = (
+            reusable_uses(),
+            with_inputs(),
+            if_condition(),
+            display_name(),
+        )
+            .prop_map(|(uses, with, condition, name)| {
+                with_optional_keys(
+                    vec![("uses", serde_yml::Value::from(uses))],
+                    vec![("with", with), ("if", condition), ("name", name)],
+                )
+            });
+        prop_oneof![standard, reusable]
+    }
+
+    fn workflow_document() -> impl Strategy<Value = serde_yml::Value> {
+        proptest::collection::btree_map("[a-z][a-z0-9_-]{0,8}", job_document(), 1..4).prop_map(
+            |jobs| {
+                yaml_mapping([
+                    ("on", serde_yml::Value::from("push")),
+                    ("jobs", yaml_mapping(jobs)),
+                ])
+            },
+        )
+    }
+
+    /// Every `uses:` reference in a workflow document, found by walking the raw
+    /// YAML rather than the typed model: `job: ref` for a reusable-workflow
+    /// call and `job[i]: ref` for step `i`'s action.
+    fn uses_in_raw_yaml(document: &serde_yml::Value) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        let jobs = document["jobs"].as_mapping().expect("jobs is a mapping");
+        for (key, job) in jobs {
+            let key = key.as_str().expect("job keys are strings");
+            if let Some(uses) = job.get("uses").and_then(serde_yml::Value::as_str) {
+                found.insert(format!("{key}: {uses}"));
+            }
+            let steps = job.get("steps").and_then(serde_yml::Value::as_sequence);
+            for (index, step) in steps.into_iter().flatten().enumerate() {
+                if let Some(uses) = step.get("uses").and_then(serde_yml::Value::as_str) {
+                    found.insert(format!("{key}[{index}]: {uses}"));
+                }
+            }
+        }
+        found
+    }
+
+    fn uses_in_model(workflow: &Workflow) -> BTreeSet<String> {
+        fn text(uses: &ActionReference) -> String {
+            match uses {
+                ActionReference::Repository(action_ref) => action_ref.to_string(),
+                ActionReference::Other(raw) => raw.clone(),
+            }
+        }
+
+        let mut found = BTreeSet::new();
+        for (key, job) in &workflow.jobs {
+            if let Some(uses) = job.uses() {
+                found.insert(format!("{key}: {}", text(uses)));
+            }
+            for (index, step) in job.steps().iter().enumerate() {
+                if let Some(uses) = step.uses() {
+                    found.insert(format!("{key}[{index}]: {}", text(uses)));
+                }
+            }
+        }
+        found
+    }
+
+    proptest! {
+        /// Oracle for the typed model: it must parse every workflow GitHub
+        /// accepts (whatever scalar types appear in `with:`, `if:` and `name:`)
+        /// and expose exactly the `uses:` references a raw YAML walk finds. A
+        /// reference the model drops is invisible to WF002, so it passes
+        /// vacuously.
+        #[test]
+        fn model_exposes_exactly_the_uses_references_in_the_yaml(
+            document in workflow_document(),
+        ) {
+            let yaml = serde_yml::to_string(&document).unwrap();
+            let workflow: Workflow = serde_yml::from_str(&yaml)
+                .map_err(|error| TestCaseError::fail(format!("{error}\n{yaml}")))?;
+            let reparsed: serde_yml::Value = serde_yml::from_str(&yaml).unwrap();
+
+            prop_assert_eq!(uses_in_model(&workflow), uses_in_raw_yaml(&reparsed), "{}", yaml);
+        }
+    }
+
+    #[test]
+    fn reusable_job_with_non_string_inputs_keeps_its_uses() {
+        // Regression: a float or null input made the reusable variant fail to
+        // parse, and the untagged fallback silently produced an empty
+        // standard job, hiding the unpinned `uses:` from WF002.
+        for input in ["1.5", "", "~", "null"] {
+            let yaml = format!(
+                "on: push\njobs:\n  call:\n    uses: evil/repo/.github/workflows/x.yml@main\n    \
+                 with:\n      v: {input}\n"
+            );
+            let workflow: Workflow = serde_yml::from_str(&yaml).unwrap();
+            assert_eq!(
+                workflow.jobs["call"].uses(),
+                Some(&ActionReference::Other(
+                    "evil/repo/.github/workflows/x.yml@main".to_owned()
+                )),
+                "input `{input}`"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_steps_with_non_string_scalars() {
+        // Each of these is a valid workflow that used to abort the whole run.
+        let yaml = "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      \
+                    - uses: actions/setup-python@v5\n        with:\n          python-version: 3.12\n          \
+                    cache:\n      - run: echo hi\n        if: false\n        name: 2\n";
+        let workflow: Workflow = serde_yml::from_str(yaml).unwrap();
+        let steps = workflow.jobs["build"].steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[1].condition.as_deref(), Some("false"));
+        assert_eq!(steps[1].name.as_deref(), Some("2"));
     }
 
     #[test]

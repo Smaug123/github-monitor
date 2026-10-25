@@ -21,6 +21,9 @@ pub use self::types::{
     RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult, SettingValue,
 };
 pub use self::workflows::WorkflowCheck;
+pub(crate) use self::workflows::{
+    action_reference_is_pinned, every_default_branch_pull_request_reports_check, is_commit_sha,
+};
 
 use crate::facts::RepoFacts;
 

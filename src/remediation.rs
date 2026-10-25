@@ -11,8 +11,9 @@ use crate::github::types::{
 };
 use crate::rules::{
     FileCheck, RepoSetting, RequiredCheckSource, Rule, RuleKind, RuleOutput, RuleResult,
-    RulesetCheck, SettingCheck, SettingValue, WorkflowCheck,
+    RulesetCheck, SettingCheck, SettingValue, WorkflowCheck, action_reference_is_pinned,
     active_branch_rulesets_for_default_branch, evaluate_rules,
+    every_default_branch_pull_request_reports_check, is_commit_sha,
     legacy_protection_superseded_by_rulesets,
 };
 use crate::types::{BranchName, RepoRef, RuleId};
@@ -1778,6 +1779,33 @@ fn plan_ensure_required_status_check(
     context: &str,
     source: &RequiredCheckSource,
 ) -> FixPlan {
+    // Requiring a check that not every pull request reports leaves those pull
+    // requests unmergeable, with no admin bypass (RS004); `--fix`'s own pull
+    // requests would be stuck too.
+    if !every_default_branch_pull_request_reports_check(facts, context) {
+        return FixPlan::Rejected {
+            reason: format!(
+                "no workflow reports status check `{context}` on every pull request into \
+                 `{}`, so requiring it would block every merge; make a `pull_request` workflow \
+                 report it first (WF004 checks the aggregator job)",
+                facts.default_branch
+            ),
+        };
+    }
+    if active_branch_rulesets_for_default_branch(facts).any(|ruleset| {
+        ruleset
+            .rules
+            .iter()
+            .any(|rule| rule.kind() == RulesetRuleType::MergeQueue)
+    }) {
+        return FixPlan::Rejected {
+            reason: format!(
+                "a merge queue applies to the default branch, and the facts cannot show that \
+                 `{context}` is reported for merge-queue runs; require it manually"
+            ),
+        };
+    }
+
     let candidates = active_branch_rulesets_for_default_branch(facts)
         .filter(|ruleset| {
             !ruleset.rules.iter().any(|rule| match rule {
@@ -1899,7 +1927,7 @@ fn plan_workflow_pin_pull_request(facts: &RepoFacts) -> FixPlan {
                 .into_iter()
                 .chain(job.steps().iter().filter_map(|step| step.uses()))
             {
-                if workflow_action_reference_is_pinned(uses) {
+                if action_reference_is_pinned(uses) {
                     continue;
                 }
 
@@ -2043,30 +2071,11 @@ fn literal_action_component(value: &str) -> bool {
     !value.is_empty() && !value.contains("${{") && !value.chars().any(char::is_whitespace)
 }
 
-fn workflow_action_reference_is_pinned(uses: &ActionReference) -> bool {
-    match uses {
-        ActionReference::Repository(action_ref) => is_commit_sha(&action_ref.version),
-        ActionReference::Other(raw) => {
-            if raw.starts_with("./") || raw.starts_with("docker://") {
-                true
-            } else if let Some((_, version)) = raw.split_once('@') {
-                is_commit_sha(version)
-            } else {
-                false
-            }
-        }
-    }
-}
-
 fn action_reference_text(uses: &ActionReference) -> String {
     match uses {
         ActionReference::Repository(action_ref) => action_ref.to_string(),
         ActionReference::Other(raw) => raw.clone(),
     }
-}
-
-fn is_commit_sha(version: &str) -> bool {
-    version.len() == 40 && version.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn replace_uses_line_value(
@@ -2209,7 +2218,7 @@ mod tests {
     use super::*;
     use crate::config::{RepoConfig, Visibility};
     use crate::facts::{RepoSettings, WorkflowFile};
-    use crate::rules::{RepoSetting, Rule, SettingValue, rules_for_repo};
+    use crate::rules::{RepoSetting, Rule, SettingValue, default_rules, rules_for_repo};
     use crate::types::Gathered;
     use crate::workflow::model::{
         ActionStep, Job, JobKind, ReusableJob, RunStep, StandardJob, Step, StepKind, Triggers,
@@ -2288,8 +2297,10 @@ mod tests {
                 jobs: BTreeMap::from([(
                     "call".to_owned(),
                     Job {
+                        name: None,
                         needs: Vec::new(),
                         condition: None,
+                        strategy: None,
                         kind: JobKind::Reusable(ReusableJob {
                             uses,
                             with: BTreeMap::new(),
@@ -2320,8 +2331,10 @@ mod tests {
                 jobs: BTreeMap::from([(
                     "build".to_owned(),
                     Job {
+                        name: None,
                         needs: Vec::new(),
                         condition: None,
+                        strategy: None,
                         kind: JobKind::Standard(StandardJob {
                             runs_on: None,
                             steps: vec![
@@ -4077,9 +4090,138 @@ mod tests {
         )
     }
 
+    /// A CI workflow whose `all-required-checks-complete` job reports on every
+    /// pull request into `main`.
+    const REPORTING_WORKFLOW_YAML: &str = "name: CI\non:\n  push:\n    branches: [main]\n  \
+        pull_request:\n    branches: [main]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    \
+        steps:\n      - run: cargo test\n  all-required-checks-complete:\n    needs: [build]\n    \
+        if: ${{ always() }}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: \
+        G-Research/common-actions/check-required-lite@2b7dc49cb14f3344fbe6019c14a31165e258c059\n        \
+        with:\n          needs-context: ${{ toJSON(needs) }}\n";
+
+    /// `base_facts` plus a CI workflow that reports `all-required-checks-complete`
+    /// on every pull request, so RS012's fix is not refused as a lock-out.
+    fn facts_reporting_aggregator() -> RepoFacts {
+        let mut facts = base_facts();
+        facts.workflows = vec![workflow_from_raw(
+            ".github/workflows/ci.yml",
+            REPORTING_WORKFLOW_YAML,
+        )];
+        facts
+    }
+
+    fn workflow_from_raw(path: &str, raw: &str) -> WorkflowFile {
+        WorkflowFile {
+            path: path.to_owned(),
+            workflow: serde_yml::from_str(raw).expect("test YAML parses"),
+            raw_yaml: Some(raw.to_owned()),
+        }
+    }
+
+    fn rs012_status(fixes: &[PlannedFix]) -> FixStatus {
+        fixes
+            .iter()
+            .find(|fix| fix.rule_id.as_str() == "RS012")
+            .expect("RS012 fails, so it has a fix entry")
+            .planned_report()
+            .status
+    }
+
+    proptest::proptest! {
+        // About 29% of generated CI shapes report the aggregator on every
+        // pull request; run enough cases to see both outcomes many times.
+        #![proptest_config(proptest::test_runner::Config::with_cases(1024))]
+
+        /// Lock-out guard: `--fix` may only make a status check required when
+        /// every pull request into the default branch will report it. Otherwise
+        /// no pull request (including the ones `--fix` itself opens) can ever
+        /// merge, and RS004 leaves no admin bypass.
+        #[test]
+        fn rs012_fix_planned_iff_every_pull_request_reports_the_check(
+            shape in crate::workflow::ci_shapes::ci_shape(),
+            ruleset_exists in proptest::prelude::any::<bool>(),
+        ) {
+            let yaml = shape.yaml();
+            let mut facts = base_facts();
+            facts.workflows = vec![workflow_from_raw(".github/workflows/ci.yml", &yaml)];
+            if ruleset_exists {
+                facts.rulesets = vec![ruleset_for_default_branch(42, "main protection", Vec::new())];
+            }
+
+            let fixes = plan_repo_fixes(&[rs001_rule(), rs012_rule()], &facts);
+
+            proptest::prop_assert_eq!(
+                rs012_status(&fixes) == FixStatus::Planned,
+                shape.reports_aggregator_on_every_pull_request(),
+                "{}",
+                yaml
+            );
+        }
+    }
+
+    #[test]
+    fn rs012_fix_rejected_for_bad_fixture_whose_workflows_never_report_the_check() {
+        let facts = bad_fixture();
+        let fixes = plan_repo_fixes(&default_rules(), &facts);
+
+        let FixStatus::Rejected { reason } = rs012_status(&fixes) else {
+            panic!("expected RS012's fix to be rejected");
+        };
+        assert!(reason.contains("block every merge"), "{reason}");
+    }
+
+    #[test]
+    fn rs012_fix_rejected_when_a_merge_queue_is_enabled() {
+        // A merge queue needs the check reported for `merge_group` runs too,
+        // which the facts do not model; refuse rather than guess.
+        let mut facts = base_facts();
+        facts.workflows = vec![workflow_from_raw(
+            ".github/workflows/ci.yml",
+            REPORTING_WORKFLOW_YAML,
+        )];
+        facts.rulesets = vec![ruleset_for_default_branch(
+            42,
+            "main protection",
+            vec![RulesetRule::parameterless(RulesetRuleType::from(
+                "merge_queue".to_owned(),
+            ))],
+        )];
+
+        let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
+
+        let FixStatus::Rejected { reason } = rs012_status(&fixes) else {
+            panic!("expected RS012's fix to be rejected");
+        };
+        assert!(reason.contains("merge queue"), "{reason}");
+    }
+
+    #[test]
+    fn workflow_pin_fix_rejects_unpinned_docker_action() {
+        // The pinning PR rewrites `owner/repo@ref` references only; it cannot
+        // resolve an image digest, so it must say so rather than claim there is
+        // nothing to pin.
+        let mut facts = base_facts();
+        facts.workflows = vec![workflow_from_raw(
+            ".github/workflows/ci.yml",
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      \
+             - uses: docker://alpine:3.19\n",
+        )];
+
+        let fixes = plan_repo_fixes(&default_rules(), &facts);
+        let wf002 = fixes
+            .iter()
+            .find(|fix| fix.rule_id.as_str() == "WF002")
+            .expect("WF002 fails on an unpinned docker action");
+
+        let FixStatus::Rejected { reason } = wf002.planned_report().status else {
+            panic!("expected WF002's fix to be rejected");
+        };
+        assert!(reason.contains("docker://alpine:3.19"), "{reason}");
+    }
+
     #[test]
     fn ensure_required_status_check_fix_targets_sole_active_branch_ruleset_when_rule_absent() {
-        let mut facts = base_facts();
+        let mut facts = facts_reporting_aggregator();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
@@ -4109,7 +4251,7 @@ mod tests {
 
     #[test]
     fn ensure_required_status_check_fix_targets_ruleset_when_other_check_present() {
-        let mut facts = base_facts();
+        let mut facts = facts_reporting_aggregator();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
@@ -4171,7 +4313,7 @@ mod tests {
         // The check exists by context but is reported by "any" app (no pinned
         // integration_id), so the GitHub-Actions-sourced rule fails and the fix
         // must target this ruleset to pin the reporting app.
-        let mut facts = base_facts();
+        let mut facts = facts_reporting_aggregator();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
@@ -4208,7 +4350,7 @@ mod tests {
         // A ruleset already requires `all-required-checks-complete`, but with no
         // pinned reporting app. The fix must rewrite that check's integration_id
         // to the GitHub Actions app rather than add a duplicate context.
-        let mut facts = base_facts();
+        let mut facts = facts_reporting_aggregator();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
@@ -4263,7 +4405,7 @@ mod tests {
 
     #[test]
     fn ensure_required_status_check_fix_rejects_when_no_ruleset_exists() {
-        let facts = base_facts();
+        let facts = facts_reporting_aggregator();
 
         let fixes = plan_repo_fixes(&[rs012_rule()], &facts);
 
@@ -4282,7 +4424,7 @@ mod tests {
 
     #[test]
     fn ensure_required_status_check_fix_rejects_when_multiple_rulesets_match() {
-        let mut facts = base_facts();
+        let mut facts = facts_reporting_aggregator();
         facts.rulesets = vec![
             ruleset_for_default_branch(1, "main protection", Vec::new()),
             ruleset_for_default_branch(2, "extra protection", Vec::new()),
@@ -4303,7 +4445,7 @@ mod tests {
 
     #[test]
     fn execute_repo_fixes_adds_required_status_check_to_existing_rule() {
-        let mut facts = base_facts();
+        let mut facts = facts_reporting_aggregator();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
@@ -4379,7 +4521,7 @@ mod tests {
         // The ruleset has no required_status_checks rule at all. RS012 and
         // RS013 both fail. The auto-fix must create the rule in a single PUT
         // with the context and strict=true.
-        let mut facts = base_facts();
+        let mut facts = facts_reporting_aggregator();
         facts.rulesets = vec![ruleset_for_default_branch(
             42,
             "main protection",
@@ -4732,7 +4874,7 @@ mod tests {
 
     #[test]
     fn rs001_plus_rs012_rs013_plan_pending_default_branch_targets() {
-        let facts = base_facts();
+        let facts = facts_reporting_aggregator();
         let fixes = plan_repo_fixes(&[rs001_rule(), rs012_rule(), rs013_rule()], &facts);
 
         let by_rule_id: BTreeMap<_, _> = fixes
@@ -4776,7 +4918,7 @@ mod tests {
 
     #[test]
     fn execute_repo_fixes_batches_rs001_rs012_rs013_into_one_creation_post() {
-        let facts = base_facts();
+        let facts = facts_reporting_aggregator();
         let fixes = plan_repo_fixes(&[rs001_rule(), rs012_rule(), rs013_rule()], &facts);
         assert_eq!(fixes.len(), 3);
 
@@ -4881,7 +5023,7 @@ mod tests {
 
     #[test]
     fn population_rules_rejected_when_rs001_absent_and_no_ruleset_exists() {
-        let facts = base_facts();
+        let facts = facts_reporting_aggregator();
         let fixes = plan_repo_fixes(&[rs012_rule(), rs013_rule()], &facts);
 
         assert_eq!(fixes.len(), 2);
